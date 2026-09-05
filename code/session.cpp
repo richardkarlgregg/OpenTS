@@ -487,7 +487,6 @@ int SessionClass::Master_Player_ID(void) const
 }
 
 
-/// <summary>Tests synchronized timing-roster membership.</summary>
 bool SessionClass::Is_Network_Timing_Player_Active(int id) const
 {
 	return(id >= 0 && id < static_cast<int>(NetTiming::MAX_TIMING_PLAYERS) && NetworkTimingReports.Is_Player_Active(id));
@@ -540,7 +539,7 @@ bool SessionClass::Record_Network_Report(int id, unsigned int process_millisecon
 }
 
 
-/// <summary>Removes a departed player from the timing census.</summary>
+/// <summary>Removes a departed player and re-picks the timing authority.</summary>
 void SessionClass::Remove_Network_Timing_Player(int id, unsigned int frame)
 {
 	if (Is_Network_Timing_Player_Active(id)) {
@@ -557,7 +556,6 @@ NetTiming::TimingCensus SessionClass::Network_Timing_Census(unsigned int frame)
 }
 
 
-/// <summary>Evaluates the adaptive-timing policy against the current census.</summary>
 NetTiming::TimingEvaluation SessionClass::Evaluate_Network_Timing(NetTiming::TimingCensus const & census, unsigned int target_fps, unsigned int frame)
 {
 	return(NetworkTimingPolicy.Evaluate(census, target_fps, frame));

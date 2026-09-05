@@ -115,7 +115,7 @@ void Game_Options_Dialog(void)
 }
 
 
-/// <summary>Returns the localized label for a synchronized connection-quality tier.</summary>
+/// <summary>Returns the text ID that names a connection-quality tier.</summary>
 int Network_Quality_Text_ID(NetTiming::ConnectionQuality quality)
 {
 	switch (quality) {

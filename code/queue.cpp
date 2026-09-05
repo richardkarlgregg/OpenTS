@@ -1449,7 +1449,7 @@ static RetcodeType Wait_For_Players(int first_time, ConnManClass *net,
 }	// end of Wait_For_Players
 
 
-/// <summary>Maps the validated game-speed setting to its historical frame-rate target.</summary>
+/// <summary>Returns the frame rate the game-speed setting asks for.</summary>
 static int Game_Speed_Frame_Rate(void)
 {
 	switch (Options.GameSpeed) {
@@ -1490,7 +1490,7 @@ static void Generate_Real_Timing_Event(void)
 			(unsigned int)census.WorstStallMilliseconds, desired_frame_rate, evaluation.Changed ? "change to" : "keep",
 			evaluation.Settings.FrameSendRate, evaluation.Settings.MaxAhead);
 	}
-	// Comparing against applied state resends timing the session never adopted.
+	// Comparing against the staged target avoids resending a change that has not activated yet.
 	if (!evaluation.Evaluated || (evaluation.Settings == Session.Network_Timing_Target()
 		&& desired_frame_rate == static_cast<unsigned int>(Session.DesiredFrameRate))) {
 		return;
