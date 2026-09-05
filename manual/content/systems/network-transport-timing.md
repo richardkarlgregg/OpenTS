@@ -20,14 +20,13 @@ least three transmissions before the connection timeout.
 
 A packet older than the connection timeout marks the connection bad but keeps
 retrying until acknowledged. Receive-queue cleanup continues during these
-retries, freeing space for the backlog when the link recovers. With no
-measurement, the bounded legacy timing is used. Global lobby traffic retains
-its fixed cadence.
+retries, freeing space for the backlog when the link recovers. An unmeasured
+link uses the bounded legacy timing, and global lobby traffic keeps its fixed
+cadence.
 
-A link that is retransmitting also doubles the timeout it measures against, once
-per retransmission proven against the current value. This keeps a link whose
-latency has risen above its timeout measurable, because every packet would
-otherwise be retransmitted before its acknowledgement arrived and no
-unambiguous sample could be taken. The next clean acknowledgement recomputes the
-timeout from the measured latency; until then the estimate keeps its last
-measured value while pacing retries.
+A retransmitting link also doubles the timeout it measures against, once per
+retransmission proven against the current value. Without that, a link whose
+latency has risen above its timeout retransmits every packet before its
+acknowledgement arrives and never yields an unambiguous sample. The next clean
+acknowledgement recomputes the timeout from the measured latency; until then the
+estimate keeps its last measured value while pacing retries.

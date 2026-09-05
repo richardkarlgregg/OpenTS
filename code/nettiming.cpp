@@ -17,7 +17,6 @@ namespace NetTiming
 {
 	namespace
 	{
-		/// <summary>Constrains a retransmission timeout to the supported range.</summary>
 		constexpr Milliseconds Clamp_Rto(std::uint64_t value)
 		{
 			return(static_cast<Milliseconds>(std::clamp<std::uint64_t>(value, MINIMUM_RTO, MAXIMUM_RTO)));
@@ -25,7 +24,6 @@ namespace NetTiming
 	}
 
 
-	/// <summary>Restores the estimator to its unsampled state.</summary>
 	void RttEstimator::Reset(void)
 	{
 		Initialized = false;
