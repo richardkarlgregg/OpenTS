@@ -178,9 +178,9 @@ static void Build_Convert_Table(void)
 /// </summary>
 static void Build_Light_Lut(unsigned int * pixels, int size)
 {
-	static float const lx = -0.45f;
-	static float const ly = 0.20f;
-	static float const lz = 0.87f;
+	static float const lx = -0.90f;
+	static float const ly = 0.08f;
+	static float const lz = 0.43f;
 
 	for (int y = 0; y < size; y++) {
 		for (int x = 0; x < size; x++) {

@@ -62,9 +62,22 @@ static int const ATLAS_MAX_SLOTS = 1024;
 static int const ATLAS_DIAMOND_ROWS = (ATLAS_MAX_SLOTS + ATLAS_COLS - 1) / ATLAS_COLS;
 static int const ATLAS_EXTRA_H = 768;
 static int const SLOPE_DIVS = 4;
-static float const SUN_X = -0.45f;
-static float const SUN_Y = 0.20f;
-static float const SUN_Z = 0.87f;
+static int const SHADE_REACH = 16;
+static int const SHADE_SUN_STEPS = 14;
+static float const SUN_X = -0.90f;
+static float const SUN_Y = 0.08f;
+static float const SUN_Z = 0.43f;
+
+
+static int _ShadeOX = 0;
+static int _ShadeOY = 0;
+static int _ShadeW = 0;
+static int _ShadeH = 0;
+static bool _ShadeReady = false;
+static std::vector<float> _ShadeHeight;
+static std::vector<unsigned char> _ShadeValid;
+static std::vector<unsigned char> _ShadeSun;
+static std::vector<unsigned char> _ShadeAo;
 
 
 struct AtlasSlot
@@ -271,28 +284,38 @@ static void Corner_Normal(CellClass const & owner, int localx, int localy, float
 }
 
 
+static bool Shade_Height_At(int cx, int cy, float & z)
+{
+	int x = cx - _ShadeOX;
+	int y = cy - _ShadeOY;
+	if (x < 0 || y < 0 || x >= _ShadeW || y >= _ShadeH) {
+		return(false);
+	}
+
+	int i = y * _ShadeW + x;
+	if (!_ShadeValid[i]) {
+		return(false);
+	}
+
+	z = _ShadeHeight[i];
+	return(true);
+}
+
+
 static bool Ground_At(float wx, float wy, float & z)
 {
 	int cx = (int)std::floor(wx / (float)CELL_LEPTON_W);
 	int cy = (int)std::floor(wy / (float)CELL_LEPTON_H);
+	if (_ShadeReady && Shade_Height_At(cx, cy, z)) {
+		return(true);
+	}
+
 	Cell cell(cx, cy);
 	if (!Map.In_Radar(cell)) {
 		return(false);
 	}
 
-	int lx = (int)wx - cx * CELL_LEPTON_W;
-	int ly = (int)wy - cy * CELL_LEPTON_H;
-	if (lx < 0) {
-		lx = 0;
-	} else if (lx > CELL_LEPTON_W - 1) {
-		lx = CELL_LEPTON_W - 1;
-	}
-	if (ly < 0) {
-		ly = 0;
-	} else if (ly > CELL_LEPTON_H - 1) {
-		ly = CELL_LEPTON_H - 1;
-	}
-	z = (float)Map[cell].Get_Height(Point2D(lx, ly));
+	z = (float)Map[cell].Get_Height(Point2D(CELL_LEPTON_W / 2, CELL_LEPTON_H / 2));
 	return(true);
 }
 
@@ -338,9 +361,157 @@ static float Occlusion_Along(float wx, float wy, float wz, float dx, float dy, f
 }
 
 
-static float Sun_Visibility(float wx, float wy, float wz)
+static float Sun_Shadow_Cell(int cx, int cy)
 {
-	return(Occlusion_Along(wx, wy, wz, SUN_X, SUN_Y, SUN_Z, 18, (float)CELL_LEPTON_W * 0.42f));
+	float z;
+	if (!Shade_Height_At(cx, cy, z)) {
+		return(1.0f);
+	}
+
+	float xy = std::sqrt(SUN_X * SUN_X + SUN_Y * SUN_Y);
+	if (xy < 0.01f) {
+		return(1.0f);
+	}
+
+	float sx = SUN_X / xy;
+	float sy = SUN_Y / xy;
+	float sz = SUN_Z / xy * (float)CELL_LEPTON_W;
+	float x = (float)cx + 0.5f + sx * 0.35f;
+	float y = (float)cy + 0.5f + sy * 0.35f;
+	z += sz * 0.35f + (float)LEVEL_LEPTON_H * 0.08f;
+	float vis = 1.0f;
+	for (int i = 0; i < SHADE_SUN_STEPS; i++) {
+		float ground;
+		if (!Shade_Height_At((int)std::floor(x), (int)std::floor(y), ground)) {
+			break;
+		}
+
+		float over = ground - z;
+		if (over > (float)LEVEL_LEPTON_H * 0.10f) {
+			return(0.0f);
+		}
+		if (over > 0.0f) {
+			vis *= 1.0f - over / ((float)LEVEL_LEPTON_H * 0.10f);
+			if (vis < 0.08f) {
+				return(0.0f);
+			}
+		}
+
+		x += sx;
+		y += sy;
+		z += sz;
+	}
+
+	return(vis);
+}
+
+
+static float Horizon_AO_Cell(int cx, int cy)
+{
+	static int const dir[4][2] = {
+		{ 1, 0 },
+		{ 0, 1 },
+		{ -1, 0 },
+		{ 0, -1 }
+	};
+	float z;
+	if (!Shade_Height_At(cx, cy, z)) {
+		return(1.0f);
+	}
+
+	float sum = 0.0f;
+	for (int i = 0; i < 4; i++) {
+		float ground;
+		if (!Shade_Height_At(cx + dir[i][0], cy + dir[i][1], ground)) {
+			sum += 1.0f;
+			continue;
+		}
+
+		float over = ground - z;
+		if (over <= 0.0f) {
+			sum += 1.0f;
+		} else {
+			float fade = over / ((float)LEVEL_LEPTON_H * 0.40f);
+			if (fade > 1.0f) {
+				fade = 1.0f;
+			}
+			sum += 1.0f - fade;
+		}
+	}
+
+	return(sum * 0.25f);
+}
+
+
+static unsigned char Pack_Shade(float value)
+{
+	if (value <= 0.0f) {
+		return(0);
+	}
+	if (value >= 1.0f) {
+		return(255);
+	}
+
+	return((unsigned char)(value * 255.0f + 0.5f));
+}
+
+
+static float Unpack_Shade(unsigned char value)
+{
+	return((float)value * (1.0f / 255.0f));
+}
+
+
+static float Sample_Shade_Byte(std::vector<unsigned char> const & grid, float fx, float fy)
+{
+	int x0 = (int)std::floor(fx);
+	int y0 = (int)std::floor(fy);
+	float tx = fx - (float)x0;
+	float ty = fy - (float)y0;
+	int x1 = x0 + 1;
+	int y1 = y0 + 1;
+	if (x0 < 0) {
+		x0 = 0;
+		x1 = 0;
+		tx = 0.0f;
+	} else if (x0 >= _ShadeW - 1) {
+		x0 = _ShadeW - 1;
+		x1 = x0;
+		tx = 0.0f;
+	}
+	if (y0 < 0) {
+		y0 = 0;
+		y1 = 0;
+		ty = 0.0f;
+	} else if (y0 >= _ShadeH - 1) {
+		y0 = _ShadeH - 1;
+		y1 = y0;
+		ty = 0.0f;
+	}
+
+	float s00 = Unpack_Shade(grid[y0 * _ShadeW + x0]);
+	float s10 = Unpack_Shade(grid[y0 * _ShadeW + x1]);
+	float s01 = Unpack_Shade(grid[y1 * _ShadeW + x0]);
+	float s11 = Unpack_Shade(grid[y1 * _ShadeW + x1]);
+	float s0 = s00 + (s10 - s00) * tx;
+	float s1 = s01 + (s11 - s01) * tx;
+	return(s0 + (s1 - s0) * ty);
+}
+
+
+static void Fetch_Shade(float wx, float wy, float wz, float & sun, float & ao)
+{
+	(void)wz;
+	if (!_ShadeReady || _ShadeW < 1 || _ShadeH < 1) {
+		sun = 1.0f;
+		ao = 1.0f;
+		return;
+	}
+
+	float fx = wx / (float)CELL_LEPTON_W - (float)_ShadeOX - 0.5f;
+	float fy = wy / (float)CELL_LEPTON_H - (float)_ShadeOY - 0.5f;
+	sun = Sample_Shade_Byte(_ShadeSun, fx, fy);
+	ao = Sample_Shade_Byte(_ShadeAo, fx, fy);
 }
 
 
@@ -369,7 +540,7 @@ static void Apply_Mouse_Light(int & r, int & g, int & b, RemasterCorner const & 
 
 	float lamp = atten * (0.18f + 0.82f * ndotl);
 	if (lamp > 0.04f) {
-		lamp *= Occlusion_Along(corner.X, corner.Y, corner.Z, dx, dy, dz, 10, (float)CELL_LEPTON_W * 0.32f);
+		lamp *= Occlusion_Along(corner.X, corner.Y, corner.Z, dx, dy, dz, 7, (float)CELL_LEPTON_W * 0.34f);
 	}
 	if (lamp < 0.01f) {
 		return;
@@ -988,22 +1159,25 @@ static void Fill_Chroma_Triangle(unsigned short * bits, int stride, Rect const &
 
 static unsigned int Lit_Color(int r, int g, int b, float brightness, RemasterCorner const & corner, bool apply_sun, bool lighting_only)
 {
-	float vis = Sun_Visibility(corner.X, corner.Y, corner.Z);
-	float shade = brightness;
+	float sun = 1.0f;
+	float ao = 1.0f;
+	Fetch_Shade(corner.X, corner.Y, corner.Z, sun, ao);
+	float sky = 0.28f + 0.72f * corner.NZ;
+	if (sky < 0.20f) {
+		sky = 0.20f;
+	}
+	float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
+	if (ndotl < 0.0f) {
+		ndotl = 0.0f;
+	}
+
+	float shade;
 	if (lighting_only) {
-		float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
-		if (ndotl < 0.0f) {
-			ndotl = 0.0f;
-		}
-		shade = (0.34f + 0.48f * ndotl * vis) * brightness;
+		shade = (0.10f * ao * sky + 0.80f * ndotl * sun) * brightness;
 	} else if (apply_sun) {
-		float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
-		if (ndotl < 0.0f) {
-			ndotl = 0.0f;
-		}
-		shade = (0.26f + 0.64f * ndotl * vis) * brightness;
+		shade = (0.08f * ao * sky + 0.86f * ndotl * sun) * brightness;
 	} else {
-		shade = (0.42f + 0.58f * vis) * brightness;
+		shade = (0.12f * ao * sky + 0.88f * sun) * brightness;
 	}
 
 	int lr;
@@ -1418,15 +1592,104 @@ static void Update_Mouse_Light(void)
 }
 
 
-static void Emit_Visible_Terrain(void)
+static void View_Cell_Span(int & originx, int & originy, int & xcount, int & ycount)
 {
 	Rect const & area = TacticalRect;
 	Coord lepton = Coord(TacticalMap->Pixel_To_Lepton(Point2D(TacticalMap->TacPixelX, TacticalMap->TacPixelY) + area.Top_Left() - TacticalRect.Top_Left()), 0);
 	Cell origin = lepton.As_Cell();
-	Cell base(origin.X - 2, origin.Y);
+	originx = origin.X;
+	originy = origin.Y;
+	ycount = area.Height / (ISO_TILE_PIXEL_H / 2) + 17;
+	xcount = area.Width / ISO_TILE_PIXEL_W + 4;
+}
 
-	int ycount = area.Height / (ISO_TILE_PIXEL_H / 2) + 17;
-	int xcount = area.Width / ISO_TILE_PIXEL_W + 4;
+
+// Vertices interpolate this cell grid; per-vertex sun walks stall the remastered path.
+static void Build_Shade_Map(void)
+{
+	_ShadeReady = false;
+	_ShadeW = 0;
+	_ShadeH = 0;
+	if (TacticalMap == NULL) {
+		return;
+	}
+
+	int originx;
+	int originy;
+	int xcount;
+	int ycount;
+	View_Cell_Span(originx, originy, xcount, ycount);
+	int minx = originx - 2 - SHADE_REACH;
+	int miny = originy - xcount - SHADE_REACH;
+	int maxx = originx - 2 + ycount / 2 + xcount + SHADE_REACH;
+	int maxy = originy + ycount / 2 + 2 + SHADE_REACH;
+	if (minx < 0) {
+		minx = 0;
+	}
+	if (miny < 0) {
+		miny = 0;
+	}
+	if (maxx > MAP_CELL_W - 1) {
+		maxx = MAP_CELL_W - 1;
+	}
+	if (maxy > MAP_CELL_H - 1) {
+		maxy = MAP_CELL_H - 1;
+	}
+	if (minx > maxx || miny > maxy) {
+		return;
+	}
+
+	_ShadeOX = minx;
+	_ShadeOY = miny;
+	_ShadeW = maxx - minx + 1;
+	_ShadeH = maxy - miny + 1;
+	std::size_t count = (std::size_t)_ShadeW * (std::size_t)_ShadeH;
+	_ShadeHeight.assign(count, 0.0f);
+	_ShadeValid.assign(count, 0);
+	_ShadeSun.assign(count, 255);
+	_ShadeAo.assign(count, 255);
+
+	int y;
+	int x;
+	for (y = 0; y < _ShadeH; y++) {
+		for (x = 0; x < _ShadeW; x++) {
+			Cell cell(_ShadeOX + x, _ShadeOY + y);
+			if (!Map.In_Radar(cell)) {
+				continue;
+			}
+
+			int i = y * _ShadeW + x;
+			_ShadeHeight[i] = (float)Map[cell].Get_Height(Point2D(CELL_LEPTON_W / 2, CELL_LEPTON_H / 2));
+			_ShadeValid[i] = 1;
+		}
+	}
+
+	_ShadeReady = true;
+	for (y = 0; y < _ShadeH; y++) {
+		for (x = 0; x < _ShadeW; x++) {
+			int i = y * _ShadeW + x;
+			if (!_ShadeValid[i]) {
+				continue;
+			}
+
+			int cx = _ShadeOX + x;
+			int cy = _ShadeOY + y;
+			_ShadeSun[i] = Pack_Shade(Sun_Shadow_Cell(cx, cy));
+			_ShadeAo[i] = Pack_Shade(Horizon_AO_Cell(cx, cy));
+		}
+	}
+}
+
+
+static void Emit_Visible_Terrain(void)
+{
+	int originx;
+	int originy;
+	int xcount;
+	int ycount;
+	View_Cell_Span(originx, originy, xcount, ycount);
+	Cell base(originx - 2, originy);
+	Rect const & area = TacticalRect;
 
 	int ix;
 	int iy;
@@ -1455,6 +1718,7 @@ void Remaster_Prepare_Frame(void)
 	_TerrainClip = Rect();
 	_MouseLight = false;
 	_AtlasOverflow = false;
+	_ShadeReady = false;
 	if (!_RemasteredGraphics || TacticalMap == NULL) {
 		return;
 	}
@@ -1462,6 +1726,7 @@ void Remaster_Prepare_Frame(void)
 	Update_Mouse_Light();
 	_TerrainClip = TacticalRect;
 	Ensure_Atlas();
+	Build_Shade_Map();
 	Emit_Visible_Terrain();
 	if (_AtlasOverflow) {
 		Clear_Atlas();
