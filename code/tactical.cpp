@@ -583,8 +583,6 @@ void Tactical::Wipe_Depth(bool fullredraw, int xoff, int yoff, Rect const & clip
 /// <param name="fullredraw">Redraw the whole view rather than just the scrolled strips?</param>
 void Tactical::Render_Tiles(Rect const & xpanrect, Rect const & ypanrect, bool fullredraw)
 {
-	Remaster_Prepare_Frame();
-
 	/*
 	 * Either the whole view, or just the strips the pan exposed.
 	 */

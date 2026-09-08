@@ -1758,6 +1758,23 @@ registered_commands:
     source: code/init.cpp
     class: ToggleRemasteredGraphicsCommandClass
     guard: null
+  forced_binding: V
+- id: ToggleRemasteredTextures
+  route_id: toggleremasteredtextures
+  kind: registered
+  title: Toggle Remastered Textures
+  description: Switches remastered terrain between original tile artwork and untextured lighting.
+  category: Interface
+  audience: player
+  availability:
+    builds:
+    - release
+    - debug
+  _provenance:
+    source: code/init.cpp
+    class: ToggleRemasteredTexturesCommandClass
+    guard: null
+  forced_binding: T
 - id: ChatToAll
   route_id: chattoall
   kind: registered

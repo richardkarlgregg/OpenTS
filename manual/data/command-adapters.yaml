@@ -293,6 +293,10 @@ fixed_exclusions:
     reason: Input sentinel, not a player control.
   - site: { file: code/mainloop.cpp, function: Keyboard_Process, expression: KN_ESC }
     reason: Escape is represented by the forced Options command binding.
+  - site: { file: code/mainloop.cpp, function: Keyboard_Process, expression: KN_V }
+    reason: V is represented by the forced ToggleRemasteredGraphics command binding.
+  - site: { file: code/mainloop.cpp, function: Keyboard_Process, expression: KN_T }
+    reason: T is represented by the forced ToggleRemasteredTextures command binding.
   - site: { file: code/mainloop.cpp, function: Keyboard_Process, expression: KN_RLSE_BIT, guard: _DEBUG }
     reason: Filters key-release events before Debug_Key; it is not a control.
 
@@ -353,7 +357,9 @@ fixed_exclusions:
   - sites:
       - { file: code/init.cpp, function: Init_Commands, expression: KN_DELETE }
       - { file: code/init.cpp, function: Init_Commands, expression: KN_ESC }
-    reason: Initialization removes conflicting mappings before assigning the two forced bindings.
+      - { file: code/init.cpp, function: Init_Commands, expression: KN_V }
+      - { file: code/init.cpp, function: Init_Commands, expression: KN_T }
+    reason: Initialization removes conflicting mappings before assigning the forced bindings.
   - sites:
       - { file: code/keyboard.cpp, function: WWKeyboardClass::Is_Mouse_Key, expression: VK_LBUTTON }
       - { file: code/keyboard.cpp, function: WWKeyboardClass::Is_Mouse_Key, expression: VK_MBUTTON }

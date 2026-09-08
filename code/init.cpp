@@ -5535,6 +5535,28 @@ class ToggleRemasteredGraphicsCommandClass : public CommandClass
 };
 
 
+class ToggleRemasteredTexturesCommandClass : public CommandClass
+{
+	public:
+		virtual char const * Get_Unique_Name(void) const {
+			return("ToggleRemasteredTextures");
+		}
+		virtual char const * Get_Display_Name(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_TEXTURES));
+		}
+		virtual char const * Get_Category(void) const {
+			return(Fetch_String((TXT_INTERFACE)));
+		}
+		virtual char const * Get_Description(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_TEXTURES_DESC));
+		}
+
+		virtual void Execute(void) const {
+			Toggle_Remastered_Textures();
+		}
+};
+
+
 class QuickSaveCommandClass : public CommandClass
 {
 	public:
@@ -5711,7 +5733,7 @@ static void Claim_Free_Key(KeyNumType key, CommandClass const * command)
 /// <summary>
 /// Builds the list of every command the player may invoke.
 /// This routine is called once during startup to populate the command list, and then binds
-/// the hotkeys to it. The delete and escape keys are claimed afterwards, so that no
+/// the hotkeys to it. The delete, escape, V, and T keys are claimed afterwards, so that no
 /// keyboard file can take them away from the player; the chat keys are claimed only when
 /// the file left them free.
 /// </summary>
@@ -5868,6 +5890,9 @@ static void Init_Commands(void)
 	const CommandClass * remastercmd = new ToggleRemasteredGraphicsCommandClass;
 	AllCommands.Add(remastercmd);
 
+	const CommandClass * remastertexcmd = new ToggleRemasteredTexturesCommandClass;
+	AllCommands.Add(remastertexcmd);
+
 	const CommandClass * chatallcmd = new ChatToAllCommandClass;
 	AllCommands.Add(chatallcmd);
 
@@ -5893,6 +5918,11 @@ static void Init_Commands(void)
 		HotkeyCommands.Remove_Index(KN_V);
 	}
 	HotkeyCommands.Add_Index(KN_V, remastercmd);
+
+	if (HotkeyCommands.Is_Present(KN_T)) {
+		HotkeyCommands.Remove_Index(KN_T);
+	}
+	HotkeyCommands.Add_Index(KN_T, remastertexcmd);
 
 	Claim_Free_Key(KN_RETURN, chatallcmd);
 	Claim_Free_Key(KN_BACKSPACE, chatteamcmd);

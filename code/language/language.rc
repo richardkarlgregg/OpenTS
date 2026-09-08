@@ -2570,6 +2570,8 @@ BEGIN
     TXT_GAME_AUTO_SAVED     "Game auto-saved."
     TXT_TOGGLE_REMASTERED_GRAPHICS "Toggle Remastered Graphics"
     TXT_TOGGLE_REMASTERED_GRAPHICS_DESC "Switches the terrain between legacy tile blits and remastered 3D lighting."
+    TXT_TOGGLE_REMASTERED_TEXTURES "Toggle Remastered Textures"
+    TXT_TOGGLE_REMASTERED_TEXTURES_DESC "Switches remastered terrain between original tile artwork and untextured lighting."
 END
 
 #endif    // English (U.S.) resources

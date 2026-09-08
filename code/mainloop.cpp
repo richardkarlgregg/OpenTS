@@ -521,6 +521,10 @@ void Keyboard_Process(KeyNumType & input)
 			Toggle_Remastered_Graphics();
 		}
 
+		if (plain == KN_T) {
+			Toggle_Remastered_Textures();
+		}
+
 #ifdef _DEBUG
 		if (Debug_Flag) {
 			switch (int(input)) {

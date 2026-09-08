@@ -265,7 +265,12 @@ def registered_commands(init_text=None, language_text=None):
 
     # These are forced after KEYBOARD.INI is read. No other binding is a
     # source-defined default, so no other record receives a binding field.
-    forced = {"DeleteWaypoint": "Delete", "Options": "Escape"}
+    forced = {
+        "DeleteWaypoint": "Delete",
+        "Options": "Escape",
+        "ToggleRemasteredGraphics": "V",
+        "ToggleRemasteredTextures": "T",
+    }
     for identifier, key in forced.items():
         if identifier not in by_id:
             raise ValueError(f"forced command {identifier!r} is not registered")

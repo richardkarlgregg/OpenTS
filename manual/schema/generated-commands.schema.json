@@ -78,7 +78,7 @@
             "audience": true,
             "availability": true,
             "category": { "$ref": "#/$defs/nonEmptyString" },
-            "forced_binding": { "enum": ["Delete", "Escape"] },
+            "forced_binding": { "enum": ["Delete", "Escape", "V", "T"] },
             "_provenance": true
           }
         }

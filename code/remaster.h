@@ -21,12 +21,16 @@ struct RemasterTerrainVertex
 	float NX;
 	float NY;
 	float NZ;
+	float U;
+	float V;
 	unsigned int Color;
 };
 
 
 bool Remastered_Graphics(void);
+bool Remastered_Textures(void);
 void Toggle_Remastered_Graphics(void);
+void Toggle_Remastered_Textures(void);
 void Remaster_Prepare_Frame(void);
 void Remaster_Draw_Cell(CellClass & cell, Point2D const & pixel, Rect const & cliprect);
-void Remaster_Fetch_Terrain(RemasterTerrainVertex const *& verts, int & count, Rect & cliprect);
+void Remaster_Fetch_Terrain(RemasterTerrainVertex const *& verts, int & count, Rect & cliprect, unsigned int const *& atlas, int & atlaswidth, int & atlasheight, bool & textured, unsigned int & atlasserial);

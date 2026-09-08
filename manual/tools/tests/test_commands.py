@@ -43,7 +43,12 @@ class RegisteredCommandTests(unittest.TestCase):
             for record in self.registered
             if "forced_binding" in record
         }
-        self.assertEqual(forced, {"DeleteWaypoint": "Delete", "Options": "Escape"})
+        self.assertEqual(forced, {
+            "DeleteWaypoint": "Delete",
+            "Options": "Escape",
+            "ToggleRemasteredGraphics": "V",
+            "ToggleRemasteredTextures": "T",
+        })
         self.assertTrue(all("default_binding" not in record for record in self.registered))
 
     def test_ids_routes_and_resource_metadata_are_exact(self):

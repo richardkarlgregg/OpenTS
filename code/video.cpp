@@ -16,6 +16,7 @@
 #include "video.h"
 
 #include "_surface.h"
+#include "_xmouse.h"
 #include "bgfxbackend.h"
 #include "dbgprint.h"
 #include "remaster.h"
@@ -277,10 +278,15 @@ void Video_Present(void)
 	RemasterTerrainVertex const * terrain = NULL;
 	int terraincount = 0;
 	Rect terrainclip;
-	Remaster_Fetch_Terrain(terrain, terraincount, terrainclip);
+	unsigned int const * atlas = NULL;
+	int atlaswidth = 0;
+	int atlasheight = 0;
+	bool textured = false;
+	unsigned int atlasserial = 0;
+	Remaster_Fetch_Terrain(terrain, terraincount, terrainclip, atlas, atlaswidth, atlasheight, textured, atlasserial);
 
 	_Presenting = true;
-	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode(), terrain, terraincount, terrainclip);
+	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode(), terrain, terraincount, terrainclip, atlas, atlaswidth, atlasheight, textured, atlasserial);
 	_Presenting = false;
 
 	_FrameIsDirty = false;
@@ -296,6 +302,18 @@ void Video_Present(void)
 /// </summary>
 void Video_Present_If_Dirty(void)
 {
+	static int _last_mouse_x = 0x7FFFFFFF;
+	static int _last_mouse_y = 0x7FFFFFFF;
+	if (Remastered_Graphics() && MouseCursor != NULL) {
+		int mx = Get_Mouse_X();
+		int my = Get_Mouse_Y();
+		if (mx != _last_mouse_x || my != _last_mouse_y) {
+			_last_mouse_x = mx;
+			_last_mouse_y = my;
+			_FrameIsDirty = true;
+		}
+	}
+
 	if (!_FrameIsDirty) {
 		return;
 	}
