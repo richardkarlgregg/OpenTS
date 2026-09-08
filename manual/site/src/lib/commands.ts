@@ -28,7 +28,7 @@ interface CommonCommand {
 export interface RegisteredCommand extends CommonCommand {
 	kind: 'registered';
 	category: string;
-	forced_binding?: 'Delete' | 'Escape' | 'V' | 'T';
+	forced_binding?: 'Delete' | 'Escape' | 'V' | 'T' | 'Y';
 }
 
 export interface FixedControl extends CommonCommand {

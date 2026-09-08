@@ -270,6 +270,7 @@ def registered_commands(init_text=None, language_text=None):
         "Options": "Escape",
         "ToggleRemasteredGraphics": "V",
         "ToggleRemasteredTextures": "T",
+        "ToggleRemasteredDensity": "Y",
     }
     for identifier, key in forced.items():
         if identifier not in by_id:

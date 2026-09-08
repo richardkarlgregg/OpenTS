@@ -525,6 +525,10 @@ void Keyboard_Process(KeyNumType & input)
 			Toggle_Remastered_Textures();
 		}
 
+		if (plain == KN_Y) {
+			Toggle_Remastered_Density();
+		}
+
 #ifdef _DEBUG
 		if (Debug_Flag) {
 			switch (int(input)) {

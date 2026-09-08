@@ -48,6 +48,7 @@ class RegisteredCommandTests(unittest.TestCase):
             "Options": "Escape",
             "ToggleRemasteredGraphics": "V",
             "ToggleRemasteredTextures": "T",
+            "ToggleRemasteredDensity": "Y",
         })
         self.assertTrue(all("default_binding" not in record for record in self.registered))
 

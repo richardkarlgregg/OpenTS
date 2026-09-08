@@ -649,6 +649,11 @@ void Tactical::Render_Tiles(Rect const & xpanrect, Rect const & ypanrect, bool f
 /// <param name="fullredraw">Redraw the whole view rather than just the scrolled strips?</param>
 void Tactical::Render_Tile_Shadows(Rect const & xpanrect, Rect const & ypanrect, bool fullredraw)
 {
+	// 2D tile-shadow blits would cover the chroma window; remastered terrain already shades the mesh.
+	if (Remastered_Graphics()) {
+		return;
+	}
+
 	/*
 	 * Either the whole view, or just the strips the pan exposed.
 	 */
@@ -2125,6 +2130,10 @@ void Tactical::Draw_Overlays(Rect const & area)
 	/*
 	 * ...and the shadows they cast over the same band afterwards.
 	 */
+	if (Remastered_Graphics()) {
+		return;
+	}
+
 	for (iy = ycount - 1; iy >= 0; iy--) {
 		Cell step(iy / 2, (iy + 1) / 2);
 		Cell cell = base + step;

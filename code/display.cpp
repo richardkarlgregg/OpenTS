@@ -130,6 +130,7 @@
 #include "overtype.h"
 #include "palette.h"
 #include "queue.h"
+#include "remaster.h"
 #include "rules.h"
 #include "savestream.h"
 #include "session.h"
@@ -1841,6 +1842,12 @@ void DisplayClass::Mouse_Right_Press(Point2D const & point)
 /// </summary>
 void DisplayClass::Mouse_Right_Release(Point2D const & point)
 {
+	bool const busy = (PendingObjectPtr != NULL && PendingObjectPtr->Is_Techno())
+		|| IsRepairMode
+		|| IsSellMode
+		|| IsPowerMode
+		|| IsTargettingMode != SUPER_NONE
+		|| IsWaypointMode;
 	if (PendingObjectPtr && PendingObjectPtr->Is_Techno()) {
 		//PendingObjectPtr->Transmit_Message(RADIO_OVER_OUT);
 		PendingObjectPtr = NULL;
@@ -1869,6 +1876,10 @@ void DisplayClass::Mouse_Right_Release(Point2D const & point)
 				}
 			}
 		}
+	}
+
+	if (!busy && Remastered_Graphics()) {
+		Remaster_Export_Tile_At_Cursor();
 	}
 
 	// If it breaks... call 228.

@@ -5557,6 +5557,28 @@ class ToggleRemasteredTexturesCommandClass : public CommandClass
 };
 
 
+class ToggleRemasteredDensityCommandClass : public CommandClass
+{
+	public:
+		virtual char const * Get_Unique_Name(void) const {
+			return("ToggleRemasteredDensity");
+		}
+		virtual char const * Get_Display_Name(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_DENSITY));
+		}
+		virtual char const * Get_Category(void) const {
+			return(Fetch_String((TXT_INTERFACE)));
+		}
+		virtual char const * Get_Description(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_DENSITY_DESC));
+		}
+
+		virtual void Execute(void) const {
+			Toggle_Remastered_Density();
+		}
+};
+
+
 class QuickSaveCommandClass : public CommandClass
 {
 	public:
@@ -5893,6 +5915,9 @@ static void Init_Commands(void)
 	const CommandClass * remastertexcmd = new ToggleRemasteredTexturesCommandClass;
 	AllCommands.Add(remastertexcmd);
 
+	const CommandClass * remasterdenscmd = new ToggleRemasteredDensityCommandClass;
+	AllCommands.Add(remasterdenscmd);
+
 	const CommandClass * chatallcmd = new ChatToAllCommandClass;
 	AllCommands.Add(chatallcmd);
 
@@ -5923,6 +5948,11 @@ static void Init_Commands(void)
 		HotkeyCommands.Remove_Index(KN_T);
 	}
 	HotkeyCommands.Add_Index(KN_T, remastertexcmd);
+
+	if (HotkeyCommands.Is_Present(KN_Y)) {
+		HotkeyCommands.Remove_Index(KN_Y);
+	}
+	HotkeyCommands.Add_Index(KN_Y, remasterdenscmd);
 
 	Claim_Free_Key(KN_RETURN, chatallcmd);
 	Claim_Free_Key(KN_BACKSPACE, chatteamcmd);

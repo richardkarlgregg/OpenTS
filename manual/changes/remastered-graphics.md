@@ -12,6 +12,9 @@ targets:
 - type: command
   id: ToggleRemasteredTextures
   effect: added
+- type: command
+  id: ToggleRemasteredDensity
+  effect: added
 - type: system
   id: remastered-graphics
   effect: added
@@ -29,17 +32,25 @@ draw that rebuilds each visible cell as a height-aware isometric quad, including
 faces where a cell drops to its east or south neighbor. Adjacent tops share edge vertices.
 Sloped cells keep texture coordinates on a subdivided heightfield so the artwork follows
 the ground instead of smearing across two triangles, and each patch is split so a ramp
-that rises on one corner does not drop a triangle. The GPU rasterizes the mesh and
+that rises on one corner does not drop a triangle. Y switches that split between 4-by-4 and
+8-by-8. The GPU rasterizes the mesh and
 lights interpolated heightfield normals from a directional sun, neighboring cells that
 darken closed ground, and a warm point light that sits on the ground under the cursor.
 Terrain between a cell and the sun or the lamp darkens that cell's vertices. A low sun
-from the west throws long cliff shadows to the east. Sun and horizon samples are taken
-once per cell in the view. With textures on, each top samples that cell's
+from the west throws cliff shadows to the east across neighboring tiles. Sun and horizon
+samples sit on a half-cell grid. Original 2D tile and overlay shadow blits are skipped so
+they do not cover the mesh. With textures on, each top samples that cell's
 original isometric diamond after it is unprojected onto the 3D quad; T turns that artwork
 off and back on. The atlas rebuilds from the current view if scrolling fills it, so mixed
-textured and untextured cells do not linger. Cliff extras are a screen-space overlay on opaque drop faces, and a drop
-face without packed extra samples a strip of the same diamond. Adjacent tops weld when
+textured and untextured cells do not linger. Cliff extras are drawn in their original isometric blit
+on top of opaque 3D drop faces; a drop face without extra stays lit. Adjacent tops weld when
 they are close in height. The switch is presentation only. After the keyboard file
-loads, remastered graphics takes V and remastered textures takes T, taking those keys
-back from whatever the file gave them. A Debug build's icon overlay is F3 only, so V is
-not shared with it.
+loads, remastered graphics takes V, remastered textures takes T, and remastered density takes Y,
+taking those keys back from whatever the file gave them. A Debug build's icon overlay is F3 only, so V is
+not shared with it. While remastered graphics is on, a right-click on terrain that is not cancelling
+another mode writes that tile set from the theater files under `Remaster\Tiles\` in the user
+directory as `tileset.obj`. A later right-click overwrites that export; if the files are open in
+another program, the write uses `tileset_new.obj` beside them. The mesh is heightfield tops plus
+walls that drop to neighboring map height. Extra artwork textures those walls. The
+cells of that set under the cursor draw a red outline. A per-sub-tile OBJ in that folder
+replaces the generated mesh for that sub-tile.

@@ -2572,6 +2572,10 @@ BEGIN
     TXT_TOGGLE_REMASTERED_GRAPHICS_DESC "Switches the terrain between legacy tile blits and remastered 3D lighting."
     TXT_TOGGLE_REMASTERED_TEXTURES "Toggle Remastered Textures"
     TXT_TOGGLE_REMASTERED_TEXTURES_DESC "Switches remastered terrain between original tile artwork and untextured lighting."
+    TXT_TOGGLE_REMASTERED_DENSITY "Toggle Remastered Density"
+    TXT_TOGGLE_REMASTERED_DENSITY_DESC "Switches remastered terrain between a 4-by-4 cell mesh and a denser 8-by-8 mesh."
+    TXT_REMASTER_TILE_EXPORTED  "Exported remastered tile to %s"
+    TXT_REMASTER_TILE_EXPORT_FAIL "Could not export remastered tile."
 END
 
 #endif    // English (U.S.) resources

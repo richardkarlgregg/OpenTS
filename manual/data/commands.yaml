@@ -1775,6 +1775,22 @@ registered_commands:
     class: ToggleRemasteredTexturesCommandClass
     guard: null
   forced_binding: T
+- id: ToggleRemasteredDensity
+  route_id: toggleremastereddensity
+  kind: registered
+  title: Toggle Remastered Density
+  description: Switches remastered terrain between a 4-by-4 cell mesh and a denser 8-by-8 mesh.
+  category: Interface
+  audience: player
+  availability:
+    builds:
+    - release
+    - debug
+  _provenance:
+    source: code/init.cpp
+    class: ToggleRemasteredDensityCommandClass
+    guard: null
+  forced_binding: Y
 - id: ChatToAll
   route_id: chattoall
   kind: registered

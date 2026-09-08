@@ -41,6 +41,7 @@ test('team commands, forced bindings, fixed controls, and launch availability ar
 		DeleteWaypoint: 'Delete',
 		ToggleRemasteredGraphics: 'V',
 		ToggleRemasteredTextures: 'T',
+		ToggleRemasteredDensity: 'Y',
 	});
 	assert.ok(commands.fixed_controls.some((record) => record.id === 'fixed:map-zoom'));
 	assert.deepEqual(
@@ -53,5 +54,5 @@ test('generated commands never publish invented defaults or extraction-only fiel
 	assert.ok(all.every((record) => !Object.hasOwn(record, 'default_binding')));
 	assert.ok(all.every((record) => Object.hasOwn(record, '_provenance')));
 	assert.ok(commands.registered_commands.every((record) =>
-		record.forced_binding === undefined || ['Delete', 'Escape', 'V', 'T'].includes(record.forced_binding)));
+		record.forced_binding === undefined || ['Delete', 'Escape', 'V', 'T', 'Y'].includes(record.forced_binding)));
 });
