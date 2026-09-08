@@ -1743,6 +1743,21 @@ registered_commands:
     source: code/init.cpp
     class: QuickLoadCommandClass
     guard: null
+- id: ToggleRemasteredGraphics
+  route_id: toggleremasteredgraphics
+  kind: registered
+  title: Toggle Remastered Graphics
+  description: Switches the terrain between legacy tile blits and remastered 3D lighting.
+  category: Interface
+  audience: player
+  availability:
+    builds:
+    - release
+    - debug
+  _provenance:
+    source: code/init.cpp
+    class: ToggleRemasteredGraphicsCommandClass
+    guard: null
 - id: ChatToAll
   route_id: chattoall
   kind: registered
@@ -2030,7 +2045,6 @@ fixed_controls:
   audience: debug
   availability: *id002
   bindings:
-  - V
   - F3
   context: In-game with Debug_Flag enabled
   _provenance:

@@ -18,6 +18,7 @@
 #include "_surface.h"
 #include "bgfxbackend.h"
 #include "dbgprint.h"
+#include "remaster.h"
 #include "dsurface.h"
 #include "globals.h"
 #include "goptions.h"
@@ -273,8 +274,13 @@ void Video_Present(void)
 		return;
 	}
 
+	RemasterTerrainVertex const * terrain = NULL;
+	int terraincount = 0;
+	Rect terrainclip;
+	Remaster_Fetch_Terrain(terrain, terraincount, terrainclip);
+
 	_Presenting = true;
-	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode());
+	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode(), terrain, terraincount, terrainclip);
 	_Presenting = false;
 
 	_FrameIsDirty = false;

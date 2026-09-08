@@ -53,6 +53,8 @@ cmake --build build --config Debug
 cmake --build build --config Release
 ```
 
+`cmake --build build --config Debug --target OpenTS` builds only the engine and `Language.dll`.
+
 CMake normally finds Visual Studio through the Visual Studio Installer. For an
 unregistered installation, set `CMAKE_GENERATOR_INSTANCE` to its directory and
 product version.

@@ -877,6 +877,8 @@
 #define TXT_ADD_TO_TEAM_DESC            1119
 #define TXT_GAME_SAVED                  1120
 #define TXT_GAME_AUTO_SAVED             1121
+#define TXT_TOGGLE_REMASTERED_GRAPHICS  1122
+#define TXT_TOGGLE_REMASTERED_GRAPHICS_DESC 1123
 #define IDC_LADDER_TYPE                 1043
 #define IDC_LADDER_LOCATION             1044
 #define IDC_FINDGAME_LOCATION           1046

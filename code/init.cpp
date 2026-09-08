@@ -150,6 +150,7 @@
 #include "pcx.h"
 #include "queue.h"
 #include "ramfile.h"
+#include "remaster.h"
 #include "revent.h"
 #include "rndstraw.h"
 #include "rules.h"
@@ -5512,6 +5513,28 @@ static bool Quick_Save_Allowed(void)
 }
 
 
+class ToggleRemasteredGraphicsCommandClass : public CommandClass
+{
+	public:
+		virtual char const * Get_Unique_Name(void) const {
+			return("ToggleRemasteredGraphics");
+		}
+		virtual char const * Get_Display_Name(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_GRAPHICS));
+		}
+		virtual char const * Get_Category(void) const {
+			return(Fetch_String((TXT_INTERFACE)));
+		}
+		virtual char const * Get_Description(void) const {
+			return(Fetch_String(TXT_TOGGLE_REMASTERED_GRAPHICS_DESC));
+		}
+
+		virtual void Execute(void) const {
+			Toggle_Remastered_Graphics();
+		}
+};
+
+
 class QuickSaveCommandClass : public CommandClass
 {
 	public:
@@ -5842,6 +5865,9 @@ static void Init_Commands(void)
 	AllCommands.Add(new QuickSaveCommandClass);
 	AllCommands.Add(new QuickLoadCommandClass);
 
+	const CommandClass * remastercmd = new ToggleRemasteredGraphicsCommandClass;
+	AllCommands.Add(remastercmd);
+
 	const CommandClass * chatallcmd = new ChatToAllCommandClass;
 	AllCommands.Add(chatallcmd);
 
@@ -5862,6 +5888,11 @@ static void Init_Commands(void)
 		HotkeyCommands.Remove_Index(KN_ESC);
 	}
 	HotkeyCommands.Add_Index(KN_ESC, optcmd);
+
+	if (HotkeyCommands.Is_Present(KN_V)) {
+		HotkeyCommands.Remove_Index(KN_V);
+	}
+	HotkeyCommands.Add_Index(KN_V, remastercmd);
 
 	Claim_Free_Key(KN_RETURN, chatallcmd);
 	Claim_Free_Key(KN_BACKSPACE, chatteamcmd);

@@ -161,11 +161,10 @@ fixed_controls:
     title: Toggle debug icon overlay
     description: Toggles the debug icon overlay.
     audience: debug
-    bindings: [V, F3]
+    bindings: [F3]
     context: In-game with Debug_Flag enabled
     availability: *debug
     sites:
-      - { file: code/debug.cpp, function: Debug_Key, expression: KN_V, guard: _DEBUG }
       - { file: code/debug.cpp, function: Debug_Key, expression: KN_F3, guard: _DEBUG }
   - id: fixed:debug-range-circles
     title: Draw sight and weapon ranges

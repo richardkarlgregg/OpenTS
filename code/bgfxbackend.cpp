@@ -23,6 +23,7 @@
 #include <fs_ocornut_imgui.bin.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +48,8 @@ static const bgfx::ViewId VIEW_PRESENT = 1;
 static bool _Initialized = false;
 
 static bgfx::TextureHandle _FrameTexture = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _OverlayTexture = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _LightLut = BGFX_INVALID_HANDLE;
 static bgfx::ProgramHandle _Program = BGFX_INVALID_HANDLE;
 static bgfx::UniformHandle _TextureSampler = BGFX_INVALID_HANDLE;
 static bgfx::FrameBufferHandle _PrescaleTarget = BGFX_INVALID_HANDLE;
@@ -65,6 +68,10 @@ static unsigned int _ResetFlags = BGFX_RESET_FLIP_AFTER_RENDER;
 static bool _FrameIs565 = false;
 static unsigned int * _ConvertBuffer = NULL;
 static unsigned int _ConvertTable[65536];
+static unsigned int _ConvertTableAlpha[65536];
+
+static const int LIGHT_LUT_SIZE = 64;
+static const unsigned short REMASTER_CHROMA = 0xF81F;
 
 
 struct BackendVertex
@@ -157,6 +164,45 @@ static void Build_Convert_Table(void)
 		unsigned int blue = (unsigned int)((pixel & 0x1F) * 255 / 31);
 
 		_ConvertTable[pixel] = 0xFF000000 | (red << 16) | (green << 8) | blue;
+		_ConvertTableAlpha[pixel] = (pixel == REMASTER_CHROMA) ? 0 : _ConvertTable[pixel];
+	}
+}
+
+
+/// <summary>
+/// Builds the sun-term table sampled by interpolated terrain normals.
+/// </summary>
+static void Build_Light_Lut(unsigned int * pixels, int size)
+{
+	static float const lx = -0.45f;
+	static float const ly = 0.20f;
+	static float const lz = 0.87f;
+
+	for (int y = 0; y < size; y++) {
+		for (int x = 0; x < size; x++) {
+			float nx = ((float)x + 0.5f) / (float)size * 2.0f - 1.0f;
+			float ny = ((float)y + 0.5f) / (float)size * 2.0f - 1.0f;
+			float n2 = nx * nx + ny * ny;
+			float nz = 0.0f;
+			if (n2 < 1.0f) {
+				nz = std::sqrt(1.0f - n2);
+			} else {
+				float inv = 1.0f / std::sqrt(n2);
+				nx *= inv;
+				ny *= inv;
+			}
+
+			float ndotl = nx * lx + ny * ly + nz * lz;
+			if (ndotl < 0.0f) {
+				ndotl = 0.0f;
+			}
+
+			unsigned int shade = (unsigned int)((0.42f + 0.58f * ndotl) * 255.0f + 0.5f);
+			if (shade > 255) {
+				shade = 255;
+			}
+			pixels[y * size + x] = 0xFF000000 | (shade << 16) | (shade << 8) | shade;
+		}
 	}
 }
 
@@ -164,7 +210,7 @@ static void Build_Convert_Table(void)
 /// <summary>
 /// Submits one textured rectangle covering the given destination.
 /// </summary>
-static void Submit_Quad(bgfx::ViewId view, bgfx::TextureHandle texture, float x, float y, float width, float height, unsigned int samplerflags, bool flipv = false)
+static void Submit_Quad(bgfx::ViewId view, bgfx::TextureHandle texture, float x, float y, float width, float height, unsigned int samplerflags, bool flipv = false, uint64_t state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A)
 {
 	bgfx::TransientVertexBuffer buffer;
 
@@ -189,8 +235,96 @@ static void Submit_Quad(bgfx::ViewId view, bgfx::TextureHandle texture, float x,
 
 	bgfx::setVertexBuffer(0, &buffer);
 	bgfx::setTexture(0, _TextureSampler, texture, samplerflags);
-	bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
+	bgfx::setState(state);
 	bgfx::submit(view, _Program);
+}
+
+
+/// <summary>
+/// Maps a frame-pixel clip rectangle into a destination measured in the same space as the
+/// present or prescale view.
+/// </summary>
+static void Map_Frame_Rect(int framex, int framey, int framew, int frameh, float destx, float desty, float scalex, float scaley, int & outx, int & outy, int & outw, int & outh)
+{
+	float x0 = destx + (float)framex * scalex;
+	float y0 = desty + (float)framey * scaley;
+	float x1 = destx + (float)(framex + framew) * scalex;
+	float y1 = desty + (float)(framey + frameh) * scaley;
+	outx = (int)std::floor(x0);
+	outy = (int)std::floor(y0);
+	outw = (int)std::ceil(x1) - outx;
+	outh = (int)std::ceil(y1) - outy;
+	if (outw < 0) {
+		outw = 0;
+	}
+	if (outh < 0) {
+		outh = 0;
+	}
+}
+
+
+/// <summary>
+/// Submits remastered terrain triangles in frame-pixel coordinates, scaled into dest.
+/// </summary>
+static void Submit_Terrain(bgfx::ViewId view, RemasterTerrainVertex const * terrain, int terraincount, float destx, float desty, float scalex, float scaley, int clipx, int clipy, int clipw, int cliph)
+{
+	if (terrain == NULL || terraincount < 3 || !bgfx::isValid(_LightLut)) {
+		return;
+	}
+
+	uint16_t scissor = 0xFFFF;
+	if (clipw > 0 && cliph > 0) {
+		int sx = 0;
+		int sy = 0;
+		int sw = 0;
+		int sh = 0;
+		Map_Frame_Rect(clipx, clipy, clipw, cliph, destx, desty, scalex, scaley, sx, sy, sw, sh);
+		if (sw > 0 && sh > 0) {
+			scissor = bgfx::setScissor((uint16_t)std::max(sx, 0), (uint16_t)std::max(sy, 0), (uint16_t)sw, (uint16_t)sh);
+		}
+	}
+
+	int offset = 0;
+	while (offset + 3 <= terraincount) {
+		uint32_t available = bgfx::getAvailTransientVertexBuffer((uint32_t)(terraincount - offset), _VertexLayout);
+		available -= available % 3;
+		if (available < 3) {
+			break;
+		}
+
+		bgfx::TransientVertexBuffer buffer;
+		bgfx::allocTransientVertexBuffer(&buffer, available, _VertexLayout);
+		BackendVertex * vertex = (BackendVertex *)buffer.data;
+		for (uint32_t i = 0; i < available; i++) {
+			RemasterTerrainVertex const & source = terrain[offset + (int)i];
+			float u = source.NX * 0.5f + 0.5f;
+			float v = source.NY * 0.5f + 0.5f;
+			if (u < 0.0f) {
+				u = 0.0f;
+			} else if (u > 1.0f) {
+				u = 1.0f;
+			}
+			if (v < 0.0f) {
+				v = 0.0f;
+			} else if (v > 1.0f) {
+				v = 1.0f;
+			}
+			vertex[i].X = destx + source.X * scalex;
+			vertex[i].Y = desty + source.Y * scaley;
+			vertex[i].U = u;
+			vertex[i].V = v;
+			vertex[i].Color = source.Color;
+		}
+
+		bgfx::setVertexBuffer(0, &buffer);
+		bgfx::setTexture(0, _TextureSampler, _LightLut, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+		if (scissor != 0xFFFF) {
+			bgfx::setScissor(scissor);
+		}
+		bgfx::setState(BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A);
+		bgfx::submit(view, _Program);
+		offset += (int)available;
+	}
 }
 
 
@@ -355,6 +489,14 @@ bool Backend_Init(NativeWindow const & window, int drawablewidth, int drawablehe
 		return(false);
 	}
 
+	unsigned int lut[LIGHT_LUT_SIZE * LIGHT_LUT_SIZE];
+	Build_Light_Lut(lut, LIGHT_LUT_SIZE);
+	_LightLut = bgfx::createTexture2D((uint16_t)LIGHT_LUT_SIZE, (uint16_t)LIGHT_LUT_SIZE, false, 1, bgfx::TextureFormat::BGRA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP, bgfx::copy(lut, (uint32_t)sizeof(lut)));
+	if (!bgfx::isValid(_LightLut)) {
+		bgfx::shutdown();
+		return(false);
+	}
+
 	_Initialized = true;
 	return(true);
 }
@@ -371,6 +513,14 @@ void Backend_Shutdown(void)
 
 	Destroy_Prescale_Target();
 
+	if (bgfx::isValid(_OverlayTexture)) {
+		bgfx::destroy(_OverlayTexture);
+		_OverlayTexture = BGFX_INVALID_HANDLE;
+	}
+	if (bgfx::isValid(_LightLut)) {
+		bgfx::destroy(_LightLut);
+		_LightLut = BGFX_INVALID_HANDLE;
+	}
 	if (bgfx::isValid(_FrameTexture)) {
 		bgfx::destroy(_FrameTexture);
 		_FrameTexture = BGFX_INVALID_HANDLE;
@@ -413,6 +563,10 @@ bool Backend_Set_Frame_Size(int width, int height)
 		bgfx::destroy(_FrameTexture);
 		_FrameTexture = BGFX_INVALID_HANDLE;
 	}
+	if (bgfx::isValid(_OverlayTexture)) {
+		bgfx::destroy(_OverlayTexture);
+		_OverlayTexture = BGFX_INVALID_HANDLE;
+	}
 
 	// bgfx names packed formats from their low bits up, so its B5G6R5 is the layout the
 	// game already draws in. Emulated support would convert every upload on the way
@@ -428,11 +582,14 @@ bool Backend_Set_Frame_Size(int width, int height)
 	delete [] _ConvertBuffer;
 	_ConvertBuffer = NULL;
 
-	if (!_FrameIs565) {
-		if (_ConvertTable[0xFFFF] == 0) {
-			Build_Convert_Table();
-		}
-		_ConvertBuffer = new unsigned int[width * height];
+	if (_ConvertTable[0xFFFF] == 0) {
+		Build_Convert_Table();
+	}
+	_ConvertBuffer = new unsigned int[width * height];
+
+	_OverlayTexture = bgfx::createTexture2D((uint16_t)width, (uint16_t)height, false, 1, bgfx::TextureFormat::BGRA8);
+	if (!bgfx::isValid(_OverlayTexture)) {
+		return(false);
 	}
 
 	_FrameWidth = width;
@@ -470,7 +627,7 @@ void Backend_On_Resize(int drawablewidth, int drawableheight)
 /// <param name="destwidth">How wide the frame is drawn.</param>
 /// <param name="destheight">How tall the frame is drawn.</param>
 /// <param name="mode">How the frame is filtered when it is drawn larger than it is.</param>
-void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode)
+void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainVertex const * terrain, int terraincount, Rect const & terrainclip)
 {
 	if (!_Initialized || pixels == NULL || !bgfx::isValid(_FrameTexture)) {
 		return;
@@ -481,7 +638,17 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 		return;
 	}
 
-	if (_FrameIs565) {
+	bool const remaster = terraincount >= 3 && terrain != NULL && bgfx::isValid(_OverlayTexture) && _ConvertBuffer != NULL;
+	if (remaster) {
+		for (int y = 0; y < _FrameHeight; y++) {
+			unsigned short const * source = (unsigned short const *)((char const *)pixels + y * pitch);
+			unsigned int * dest = _ConvertBuffer + y * _FrameWidth;
+			for (int x = 0; x < _FrameWidth; x++) {
+				dest[x] = _ConvertTableAlpha[source[x]];
+			}
+		}
+		bgfx::updateTexture2D(_OverlayTexture, 0, 0, 0, 0, (uint16_t)_FrameWidth, (uint16_t)_FrameHeight, bgfx::copy(_ConvertBuffer, (uint32_t)(_FrameWidth * _FrameHeight * 4)), (uint16_t)(_FrameWidth * 4));
+	} else if (_FrameIs565) {
 		bgfx::updateTexture2D(_FrameTexture, 0, 0, 0, 0, (uint16_t)_FrameWidth, (uint16_t)_FrameHeight, bgfx::copy(pixels, (uint32_t)(_FrameHeight * pitch)), (uint16_t)pitch);
 	} else if (_ConvertBuffer != NULL) {
 		for (int y = 0; y < _FrameHeight; y++) {
@@ -494,7 +661,7 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 		bgfx::updateTexture2D(_FrameTexture, 0, 0, 0, 0, (uint16_t)_FrameWidth, (uint16_t)_FrameHeight, bgfx::copy(_ConvertBuffer, (uint32_t)(_FrameWidth * _FrameHeight * 4)), (uint16_t)(_FrameWidth * 4));
 	}
 
-	bgfx::TextureHandle source = _FrameTexture;
+	bgfx::TextureHandle source = remaster ? _OverlayTexture : _FrameTexture;
 	unsigned int samplerflags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
 	bool from_prescale = false;
 
@@ -520,7 +687,14 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 				bgfx::setViewFrameBuffer(VIEW_PRESCALE, _PrescaleTarget);
 				bgfx::setViewClear(VIEW_PRESCALE, BGFX_CLEAR_COLOR, 0x000000FF);
 				Set_View_Transform(VIEW_PRESCALE, _PrescaleWidth, _PrescaleHeight);
-				Submit_Quad(VIEW_PRESCALE, _FrameTexture, 0.0f, 0.0f, (float)_PrescaleWidth, (float)_PrescaleHeight, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT);
+				if (remaster) {
+					float scalex = (float)_PrescaleWidth / (float)_FrameWidth;
+					float scaleypx = (float)_PrescaleHeight / (float)_FrameHeight;
+					Submit_Terrain(VIEW_PRESCALE, terrain, terraincount, 0.0f, 0.0f, scalex, scaleypx, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height);
+					Submit_Quad(VIEW_PRESCALE, _OverlayTexture, 0.0f, 0.0f, (float)_PrescaleWidth, (float)_PrescaleHeight, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT, false, BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
+				} else {
+					Submit_Quad(VIEW_PRESCALE, _FrameTexture, 0.0f, 0.0f, (float)_PrescaleWidth, (float)_PrescaleHeight, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT);
+				}
 				source = bgfx::getTexture(_PrescaleTarget);
 				from_prescale = true;
 			}
@@ -534,7 +708,14 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 	Set_View_Transform(VIEW_PRESENT, _DrawableWidth, _DrawableHeight);
 
 	bool flipv = from_prescale && bgfx::getCaps()->originBottomLeft;
-	Submit_Quad(VIEW_PRESENT, source, (float)destx, (float)desty, (float)destwidth, (float)destheight, samplerflags, flipv);
+	if (remaster && !from_prescale) {
+		float scalex = (float)destwidth / (float)_FrameWidth;
+		float scaley = (float)destheight / (float)_FrameHeight;
+		Submit_Terrain(VIEW_PRESENT, terrain, terraincount, (float)destx, (float)desty, scalex, scaley, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height);
+		Submit_Quad(VIEW_PRESENT, source, (float)destx, (float)desty, (float)destwidth, (float)destheight, samplerflags, false, BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
+	} else {
+		Submit_Quad(VIEW_PRESENT, source, (float)destx, (float)desty, (float)destwidth, (float)destheight, samplerflags, flipv);
+	}
 
 	bgfx::frame();
 }

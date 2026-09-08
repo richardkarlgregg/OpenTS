@@ -53,6 +53,7 @@
 #include "mouse.h"
 #include "overtype.h"
 #include "ovrlight.h"
+#include "remaster.h"
 #include "rules.h"
 #include "savestream.h"
 #include "scheme.h"
@@ -582,6 +583,8 @@ void Tactical::Wipe_Depth(bool fullredraw, int xoff, int yoff, Rect const & clip
 /// <param name="fullredraw">Redraw the whole view rather than just the scrolled strips?</param>
 void Tactical::Render_Tiles(Rect const & xpanrect, Rect const & ypanrect, bool fullredraw)
 {
+	Remaster_Prepare_Frame();
+
 	/*
 	 * Either the whole view, or just the strips the pan exposed.
 	 */
@@ -2232,7 +2235,11 @@ void Tactical::Draw_Tiles(Rect const & area, Rect const & cliprect)
 				Coord_To_Pixel(coord, pixel);
 				pixel.X += ISO_TILE_PIXEL_W / -2;
 				if (render.Is_Valid() && inter.Is_Valid()) {
-					cellptr->Draw_It(pixel, cliprect, 0);
+					if (Remastered_Graphics()) {
+						Remaster_Draw_Cell(*cellptr, pixel, cliprect);
+					} else {
+						cellptr->Draw_It(pixel, cliprect, 0);
+					}
 				}
 			}
 			cell += Cell(1, -1);
@@ -2298,7 +2305,11 @@ void Tactical::Draw_Tiles(Cell const & cell, Rect const & cliprect)
 	if (basecell->Height < 2) {
 		Point2D pixel = screen - Point2D(TacPixelX, TacPixelY);
 		pixel.X -= ISO_TILE_PIXEL_W / 2;
-		basecell->Draw_It(pixel, TacticalRect, 0);
+		if (Remastered_Graphics()) {
+			Remaster_Draw_Cell(*basecell, pixel, TacticalRect);
+		} else {
+			basecell->Draw_It(pixel, TacticalRect, 0);
+		}
 	}
 
 	int x = cell.X;
@@ -2378,7 +2389,11 @@ void Tactical::Draw_Tiles(Cell const & cell, Rect const & cliprect)
 				Point2D pixel;
 				Coord_To_Pixel(coord, pixel);
 				pixel.X -= ISO_TILE_PIXEL_W / 2;
-				Map[above].Draw_It(pixel, TacticalRect, 0);
+				if (Remastered_Graphics()) {
+					Remaster_Draw_Cell(Map[above], pixel, TacticalRect);
+				} else {
+					Map[above].Draw_It(pixel, TacticalRect, 0);
+				}
 			}
 		}
 		x++;

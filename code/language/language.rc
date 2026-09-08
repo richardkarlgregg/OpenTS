@@ -2568,6 +2568,8 @@ BEGIN
     TXT_ADD_TO_TEAM_DESC    "Adds the selected units to team %d and selects the whole team."
     TXT_GAME_SAVED          "Game saved."
     TXT_GAME_AUTO_SAVED     "Game auto-saved."
+    TXT_TOGGLE_REMASTERED_GRAPHICS "Toggle Remastered Graphics"
+    TXT_TOGGLE_REMASTERED_GRAPHICS_DESC "Switches the terrain between legacy tile blits and remastered 3D lighting."
 END
 
 #endif    // English (U.S.) resources

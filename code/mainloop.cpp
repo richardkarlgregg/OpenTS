@@ -48,6 +48,7 @@
 #include "netdlg.h"
 #include "pcx.h"
 #include "queue.h"
+#include "remaster.h"
 #include "rules.h"
 #include "savemgr.h"
 #include "scenario.h"
@@ -514,6 +515,10 @@ void Keyboard_Process(KeyNumType & input)
 		*/
 		if (plain == KN_TAB) {
 			Map.Zoom_Mode_Control();
+		}
+
+		if (plain == KN_V) {
+			Toggle_Remastered_Graphics();
 		}
 
 #ifdef _DEBUG

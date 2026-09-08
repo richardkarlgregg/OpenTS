@@ -14,6 +14,7 @@
 #pragma once
 
 #include "nativewindow.hh"
+#include "remaster.h"
 
 
 enum BackendRenderer {
@@ -40,7 +41,8 @@ bool Backend_Set_Frame_Size(int width, int height);
 void Backend_On_Resize(int drawablewidth, int drawableheight);
 
 // Uploads the frame and presents it. The pixels are 16 bit 565 and stay owned by the
-// caller; they are consumed before this returns.
-void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode);
+// caller; they are consumed before this returns. Terrain vertices, when present, are
+// drawn first and magenta 565 pixels in the frame become transparent over them.
+void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainVertex const * terrain, int terraincount, Rect const & terrainclip);
 
 char const * Backend_Renderer_Name(void);

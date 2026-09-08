@@ -325,7 +325,6 @@ void Debug_Key(unsigned input)
 				DebugTimer = 0;
 				break;
 
-			case KN_V:
 			case KN_F3:
 				Debug_Icon = (Debug_Icon == false);
 				Map.Flag_To_Redraw(GS_REDRAW_ALL);
