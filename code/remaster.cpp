@@ -41,8 +41,9 @@ static bool _RemasteredTextures = true;
 static std::vector<RemasterTerrainVertex> _TerrainVerts;
 static Rect _TerrainClip;
 static bool _MouseLight = false;
-static float _MouseSX = 0.0f;
-static float _MouseSY = 0.0f;
+static float _MouseX = 0.0f;
+static float _MouseY = 0.0f;
+static float _MouseZ = 0.0f;
 static std::vector<unsigned int> _AtlasPixels;
 static int _AtlasWidth = 0;
 static int _AtlasHeight = 0;
@@ -50,16 +51,20 @@ static int _ExtraX = 0;
 static int _ExtraY = 0;
 static int _ExtraRowH = 0;
 static unsigned int _AtlasSerial = 1;
+static bool _AtlasOverflow = false;
 
 
 static int const DIAMOND_W = 48;
 static int const DIAMOND_H = 24;
 static int const TILE_SLOT = 48;
 static int const ATLAS_COLS = 32;
-static int const ATLAS_MAX_SLOTS = 512;
+static int const ATLAS_MAX_SLOTS = 1024;
 static int const ATLAS_DIAMOND_ROWS = (ATLAS_MAX_SLOTS + ATLAS_COLS - 1) / ATLAS_COLS;
 static int const ATLAS_EXTRA_H = 768;
 static int const SLOPE_DIVS = 4;
+static float const SUN_X = -0.45f;
+static float const SUN_Y = 0.20f;
+static float const SUN_Z = 0.87f;
 
 
 struct AtlasSlot
@@ -81,6 +86,9 @@ struct AtlasSlot
 static std::vector<AtlasSlot> _Slots;
 
 
+static void Seal_White_Texel(void);
+
+
 static void Clear_Atlas(void)
 {
 	_Slots.clear();
@@ -94,7 +102,20 @@ static void Clear_Atlas(void)
 }
 
 
-static void Seal_White_Texel(void);
+static void Ensure_Atlas(void)
+{
+	if (!_RemasteredTextures || !_AtlasPixels.empty()) {
+		return;
+	}
+
+	_AtlasWidth = ATLAS_COLS * TILE_SLOT;
+	_AtlasHeight = ATLAS_DIAMOND_ROWS * TILE_SLOT + ATLAS_EXTRA_H;
+	_AtlasPixels.assign((size_t)_AtlasWidth * (size_t)_AtlasHeight, 0);
+	_ExtraX = 0;
+	_ExtraY = ATLAS_DIAMOND_ROWS * TILE_SLOT;
+	_ExtraRowH = 0;
+	Seal_White_Texel();
+}
 
 
 // Magenta in the 565 frame is discarded so the GPU terrain shows through.
@@ -250,29 +271,118 @@ static void Corner_Normal(CellClass const & owner, int localx, int localy, float
 }
 
 
-static void Apply_Mouse_Light(int & r, int & g, int & b, float sx, float sy, bool textured)
+static bool Ground_At(float wx, float wy, float & z)
+{
+	int cx = (int)std::floor(wx / (float)CELL_LEPTON_W);
+	int cy = (int)std::floor(wy / (float)CELL_LEPTON_H);
+	Cell cell(cx, cy);
+	if (!Map.In_Radar(cell)) {
+		return(false);
+	}
+
+	int lx = (int)wx - cx * CELL_LEPTON_W;
+	int ly = (int)wy - cy * CELL_LEPTON_H;
+	if (lx < 0) {
+		lx = 0;
+	} else if (lx > CELL_LEPTON_W - 1) {
+		lx = CELL_LEPTON_W - 1;
+	}
+	if (ly < 0) {
+		ly = 0;
+	} else if (ly > CELL_LEPTON_H - 1) {
+		ly = CELL_LEPTON_H - 1;
+	}
+	z = (float)Map[cell].Get_Height(Point2D(lx, ly));
+	return(true);
+}
+
+
+static float Occlusion_Along(float wx, float wy, float wz, float dx, float dy, float dz, int steps, float step_len)
+{
+	float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+	if (length < 1.0f) {
+		return(1.0f);
+	}
+
+	dx /= length;
+	dy /= length;
+	dz /= length;
+	float x = wx + dx * step_len;
+	float y = wy + dy * step_len;
+	float z = wz + dz * step_len + (float)LEVEL_LEPTON_H * 0.12f;
+	float vis = 1.0f;
+	for (int i = 0; i < steps; i++) {
+		float ground;
+		if (!Ground_At(x, y, ground)) {
+			break;
+		}
+
+		float over = ground - z;
+		if (over > 0.0f) {
+			float fade = over / ((float)LEVEL_LEPTON_H * 0.40f);
+			if (fade > 1.0f) {
+				fade = 1.0f;
+			}
+			vis *= (1.0f - fade);
+			if (vis < 0.05f) {
+				return(0.0f);
+			}
+		}
+
+		x += dx * step_len;
+		y += dy * step_len;
+		z += dz * step_len;
+	}
+
+	return(vis);
+}
+
+
+static float Sun_Visibility(float wx, float wy, float wz)
+{
+	return(Occlusion_Along(wx, wy, wz, SUN_X, SUN_Y, SUN_Z, 18, (float)CELL_LEPTON_W * 0.42f));
+}
+
+
+static void Apply_Mouse_Light(int & r, int & g, int & b, RemasterCorner const & corner, bool textured)
 {
 	if (!_MouseLight) {
 		return;
 	}
 
-	float dx = _MouseSX - sx;
-	float dy = _MouseSY - sy;
-	float radius = textured ? 72.0f : 56.0f;
-	float t = (dx * dx + dy * dy) / (radius * radius);
+	float dx = _MouseX - corner.X;
+	float dy = _MouseY - corner.Y;
+	float dz = _MouseZ - corner.Z;
+	float dist2 = dx * dx + dy * dy + dz * dz;
+	float radius = (float)CELL_LEPTON_W * (textured ? 2.8f : 2.4f);
+	float t = dist2 / (radius * radius);
 	if (t >= 1.0f) {
 		return;
 	}
 
-	float lamp = (1.0f - t) * (1.0f - t);
+	float atten = (1.0f - t) * (1.0f - t);
+	float inv = 1.0f / std::sqrt(dist2 + 1.0f);
+	float ndotl = corner.NX * dx * inv + corner.NY * dy * inv + corner.NZ * dz * inv;
+	if (ndotl < 0.0f) {
+		ndotl = 0.0f;
+	}
+
+	float lamp = atten * (0.18f + 0.82f * ndotl);
+	if (lamp > 0.04f) {
+		lamp *= Occlusion_Along(corner.X, corner.Y, corner.Z, dx, dy, dz, 10, (float)CELL_LEPTON_W * 0.32f);
+	}
+	if (lamp < 0.01f) {
+		return;
+	}
+
 	if (textured) {
-		r = (int)(r * (1.0f + 0.85f * lamp) + 110.0f * lamp + 0.5f);
-		g = (int)(g * (1.0f + 0.70f * lamp) + 72.0f * lamp + 0.5f);
-		b = (int)(b * (1.0f + 0.35f * lamp) + 24.0f * lamp + 0.5f);
+		r = (int)(r * (1.0f + 0.95f * lamp) + 95.0f * lamp + 0.5f);
+		g = (int)(g * (1.0f + 0.75f * lamp) + 58.0f * lamp + 0.5f);
+		b = (int)(b * (1.0f + 0.32f * lamp) + 16.0f * lamp + 0.5f);
 	} else {
-		r = (int)(r * (1.0f + 1.35f * lamp) + 48.0f * lamp + 0.5f);
-		g = (int)(g * (1.0f + 1.15f * lamp) + 28.0f * lamp + 0.5f);
-		b = (int)(b * (1.0f + 0.55f * lamp) + 8.0f * lamp + 0.5f);
+		r = (int)(r * (1.0f + 1.45f * lamp) + 40.0f * lamp + 0.5f);
+		g = (int)(g * (1.0f + 1.20f * lamp) + 22.0f * lamp + 0.5f);
+		b = (int)(b * (1.0f + 0.50f * lamp) + 6.0f * lamp + 0.5f);
 	}
 }
 
@@ -392,6 +502,7 @@ static bool Pack_Extra_Rect(int width, int height, int & destx, int & desty)
 		_ExtraRowH = 0;
 	}
 	if (_ExtraY + height > _AtlasHeight - 2) {
+		_AtlasOverflow = true;
 		return(false);
 	}
 	destx = _ExtraX;
@@ -516,6 +627,9 @@ static int Bake_Tile_Slot(CellClass const & cell)
 		return(existing);
 	}
 	if ((int)_Slots.size() >= ATLAS_MAX_SLOTS || _AtlasWidth <= 0 || _AtlasHeight <= 0) {
+		if ((int)_Slots.size() >= ATLAS_MAX_SLOTS) {
+			_AtlasOverflow = true;
+		}
 		return(-1);
 	}
 
@@ -874,17 +988,22 @@ static void Fill_Chroma_Triangle(unsigned short * bits, int stride, Rect const &
 
 static unsigned int Lit_Color(int r, int g, int b, float brightness, RemasterCorner const & corner, bool apply_sun, bool lighting_only)
 {
+	float vis = Sun_Visibility(corner.X, corner.Y, corner.Z);
 	float shade = brightness;
-	if (apply_sun) {
-		float ndotl = corner.NX * -0.45f + corner.NY * 0.20f + corner.NZ * 0.87f;
+	if (lighting_only) {
+		float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
 		if (ndotl < 0.0f) {
 			ndotl = 0.0f;
 		}
-		if (lighting_only) {
-			shade = (0.50f + 0.28f * ndotl) * brightness;
-		} else {
-			shade = (0.42f + 0.58f * ndotl) * brightness;
+		shade = (0.34f + 0.48f * ndotl * vis) * brightness;
+	} else if (apply_sun) {
+		float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
+		if (ndotl < 0.0f) {
+			ndotl = 0.0f;
 		}
+		shade = (0.26f + 0.64f * ndotl * vis) * brightness;
+	} else {
+		shade = (0.42f + 0.58f * vis) * brightness;
 	}
 
 	int lr;
@@ -900,7 +1019,7 @@ static unsigned int Lit_Color(int r, int g, int b, float brightness, RemasterCor
 		lg = (int)(g * shade + 0.5f);
 		lb = (int)(b * shade + 0.5f);
 	}
-	Apply_Mouse_Light(lr, lg, lb, corner.SX, corner.SY, _RemasteredTextures);
+	Apply_Mouse_Light(lr, lg, lb, corner, _RemasteredTextures);
 	return(Pack_Color(lr, lg, lb));
 }
 
@@ -909,6 +1028,7 @@ static void Emit_Triangle(RemasterCorner const & a, RemasterCorner const & b, Re
 {
 	if (chroma != NULL) {
 		Fill_Chroma_Triangle(chroma, stride, cliprect, a, b, c);
+		return;
 	}
 
 	_TerrainVerts.push_back(Make_Terrain_Vertex(a, Lit_Color(r, g, bl, brightness, a, apply_sun, lighting_only), ua, va));
@@ -1280,33 +1400,26 @@ static void Update_Mouse_Light(void)
 		return;
 	}
 
-	_MouseSX = (float)mouse.X;
-	_MouseSY = (float)mouse.Y;
+	Coord coord = TacticalMap->Pixel_To_Coord(mouse);
+	if (coord == COORD_NONE) {
+		return;
+	}
+
+	Cell cell = coord.As_Cell();
+	if (!Map.In_Radar(cell)) {
+		return;
+	}
+
+	Point2D local(coord.X & (CELL_LEPTON_W - 1), coord.Y & (CELL_LEPTON_H - 1));
+	_MouseX = (float)coord.X;
+	_MouseY = (float)coord.Y;
+	_MouseZ = (float)Map[cell].Get_Height(local) + (float)LEVEL_LEPTON_H * 0.55f;
 	_MouseLight = true;
 }
 
 
-void Remaster_Prepare_Frame(void)
+static void Emit_Visible_Terrain(void)
 {
-	_TerrainVerts.clear();
-	_TerrainClip = Rect();
-	_MouseLight = false;
-	if (!_RemasteredGraphics || TacticalMap == NULL) {
-		return;
-	}
-
-	Update_Mouse_Light();
-	_TerrainClip = TacticalRect;
-	if (_RemasteredTextures && _AtlasPixels.empty()) {
-		_AtlasWidth = ATLAS_COLS * TILE_SLOT;
-		_AtlasHeight = ATLAS_DIAMOND_ROWS * TILE_SLOT + ATLAS_EXTRA_H;
-		_AtlasPixels.assign((size_t)_AtlasWidth * (size_t)_AtlasHeight, 0);
-		_ExtraX = 0;
-		_ExtraY = ATLAS_DIAMOND_ROWS * TILE_SLOT;
-		_ExtraRowH = 0;
-		Seal_White_Texel();
-	}
-
 	Rect const & area = TacticalRect;
 	Coord lepton = Coord(TacticalMap->Pixel_To_Lepton(Point2D(TacticalMap->TacPixelX, TacticalMap->TacPixelY) + area.Top_Left() - TacticalRect.Top_Left()), 0);
 	Cell origin = lepton.As_Cell();
@@ -1332,6 +1445,30 @@ void Remaster_Prepare_Frame(void)
 			}
 			cell += Cell(1, -1);
 		}
+	}
+}
+
+
+void Remaster_Prepare_Frame(void)
+{
+	_TerrainVerts.clear();
+	_TerrainClip = Rect();
+	_MouseLight = false;
+	_AtlasOverflow = false;
+	if (!_RemasteredGraphics || TacticalMap == NULL) {
+		return;
+	}
+
+	Update_Mouse_Light();
+	_TerrainClip = TacticalRect;
+	Ensure_Atlas();
+	Emit_Visible_Terrain();
+	if (_AtlasOverflow) {
+		Clear_Atlas();
+		Ensure_Atlas();
+		_TerrainVerts.clear();
+		_AtlasOverflow = false;
+		Emit_Visible_Terrain();
 	}
 }
 
