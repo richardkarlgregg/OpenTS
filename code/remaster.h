@@ -27,6 +27,23 @@ struct RemasterTerrainVertex
 };
 
 
+struct RemasterTerrainLayer
+{
+	RemasterTerrainVertex const * Verts;
+	int Count;
+	unsigned int const * Pixels;
+	int Width;
+	int Height;
+	unsigned int Serial;
+	bool Linear;
+};
+
+enum
+{
+	REMASTER_LAYER_MAX = 8
+};
+
+
 bool Remastered_Graphics(void);
 bool Remastered_Textures(void);
 bool Remastered_Density(void);
@@ -36,4 +53,4 @@ void Toggle_Remastered_Density(void);
 void Remaster_Prepare_Frame(void);
 void Remaster_Draw_Cell(CellClass & cell, Point2D const & pixel, Rect const & cliprect);
 void Remaster_Export_Tile_At_Cursor(void);
-void Remaster_Fetch_Terrain(RemasterTerrainVertex const *& verts, int & count, Rect & cliprect, unsigned int const *& atlas, int & atlaswidth, int & atlasheight, bool & textured, unsigned int & atlasserial);
+void Remaster_Fetch_Terrain(RemasterTerrainLayer * layers, int & layercount, Rect & cliprect, bool & textured);

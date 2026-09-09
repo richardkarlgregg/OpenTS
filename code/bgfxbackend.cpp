@@ -50,7 +50,10 @@ static bool _Initialized = false;
 static bgfx::TextureHandle _FrameTexture = BGFX_INVALID_HANDLE;
 static bgfx::TextureHandle _OverlayTexture = BGFX_INVALID_HANDLE;
 static bgfx::TextureHandle _LightLut = BGFX_INVALID_HANDLE;
-static bgfx::TextureHandle _TileAtlas = BGFX_INVALID_HANDLE;
+static bgfx::TextureHandle _LayerGpu[REMASTER_LAYER_MAX];
+static int _LayerGpuW[REMASTER_LAYER_MAX];
+static int _LayerGpuH[REMASTER_LAYER_MAX];
+static unsigned int _LayerGpuSerial[REMASTER_LAYER_MAX];
 static bgfx::ProgramHandle _Program = BGFX_INVALID_HANDLE;
 static bgfx::UniformHandle _TextureSampler = BGFX_INVALID_HANDLE;
 static bgfx::FrameBufferHandle _PrescaleTarget = BGFX_INVALID_HANDLE;
@@ -62,9 +65,6 @@ static int _PrescaleWidth = 0;
 static int _PrescaleHeight = 0;
 static int _DrawableWidth = 0;
 static int _DrawableHeight = 0;
-static int _TileAtlasWidth = 0;
-static int _TileAtlasHeight = 0;
-static unsigned int _TileAtlasSerial = 0;
 static unsigned int _ResetFlags = BGFX_RESET_FLIP_AFTER_RENDER;
 
 // True while the frame texture holds the game's own 565 layout. When the hardware cannot
@@ -267,28 +267,32 @@ static void Map_Frame_Rect(int framex, int framey, int framew, int frameh, float
 }
 
 
-static bool Upload_Tile_Atlas(unsigned int const * pixels, int width, int height, unsigned int serial)
+static bool Upload_Layer_Texture(int slot, unsigned int const * pixels, int width, int height, unsigned int serial)
 {
-	if (pixels == NULL || width <= 0 || height <= 0) {
+	if (slot < 0 || slot >= REMASTER_LAYER_MAX || pixels == NULL || width <= 0 || height <= 0) {
 		return(false);
 	}
 
+	if (bgfx::isValid(_LayerGpu[slot]) && _LayerGpuW[slot] == width && _LayerGpuH[slot] == height && _LayerGpuSerial[slot] == serial) {
+		return(true);
+	}
+
 	uint32_t bytes = (uint32_t)width * (uint32_t)height * 4u;
-	if (!bgfx::isValid(_TileAtlas) || _TileAtlasWidth != width || _TileAtlasHeight != height || _TileAtlasSerial != serial) {
-		if (bgfx::isValid(_TileAtlas)) {
-			bgfx::destroy(_TileAtlas);
-			_TileAtlas = BGFX_INVALID_HANDLE;
+	if (!bgfx::isValid(_LayerGpu[slot]) || _LayerGpuW[slot] != width || _LayerGpuH[slot] != height) {
+		if (bgfx::isValid(_LayerGpu[slot])) {
+			bgfx::destroy(_LayerGpu[slot]);
+			_LayerGpu[slot] = BGFX_INVALID_HANDLE;
 		}
-		_TileAtlas = bgfx::createTexture2D((uint16_t)width, (uint16_t)height, false, 1, bgfx::TextureFormat::BGRA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT);
-		_TileAtlasWidth = width;
-		_TileAtlasHeight = height;
-		_TileAtlasSerial = serial;
-		if (!bgfx::isValid(_TileAtlas)) {
+		_LayerGpu[slot] = bgfx::createTexture2D((uint16_t)width, (uint16_t)height, false, 1, bgfx::TextureFormat::BGRA8, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP);
+		_LayerGpuW[slot] = width;
+		_LayerGpuH[slot] = height;
+		if (!bgfx::isValid(_LayerGpu[slot])) {
 			return(false);
 		}
 	}
 
-	bgfx::updateTexture2D(_TileAtlas, 0, 0, 0, 0, (uint16_t)width, (uint16_t)height, bgfx::copy(pixels, bytes), (uint16_t)(width * 4));
+	bgfx::updateTexture2D(_LayerGpu[slot], 0, 0, 0, 0, (uint16_t)width, (uint16_t)height, bgfx::copy(pixels, bytes), (uint16_t)(width * 4));
+	_LayerGpuSerial[slot] = serial;
 	return(true);
 }
 
@@ -296,21 +300,23 @@ static bool Upload_Tile_Atlas(unsigned int const * pixels, int width, int height
 /// <summary>
 /// Submits remastered terrain triangles in frame-pixel coordinates, scaled into dest.
 /// </summary>
-static void Submit_Terrain(bgfx::ViewId view, RemasterTerrainVertex const * terrain, int terraincount, float destx, float desty, float scalex, float scaley, int clipx, int clipy, int clipw, int cliph, unsigned int const * atlas, int atlaswidth, int atlasheight, bool textured, unsigned int atlasserial)
+static void Submit_Terrain_Layer(bgfx::ViewId view, RemasterTerrainLayer const & layer, int slot, float destx, float desty, float scalex, float scaley, int clipx, int clipy, int clipw, int cliph, bool textured)
 {
-	if (terrain == NULL || terraincount < 3) {
+	if (layer.Verts == NULL || layer.Count < 3) {
 		return;
 	}
 
 	bgfx::TextureHandle texture = _LightLut;
 	unsigned int samplerflags = BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP;
 	uint64_t state = BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A;
-	if (textured) {
-		if (!Upload_Tile_Atlas(atlas, atlaswidth, atlasheight, atlasserial)) {
+	if (textured && layer.Pixels != NULL) {
+		if (!Upload_Layer_Texture(slot, layer.Pixels, layer.Width, layer.Height, layer.Serial)) {
 			return;
 		}
-		texture = _TileAtlas;
-		samplerflags |= BGFX_SAMPLER_POINT;
+		texture = _LayerGpu[slot];
+		if (!layer.Linear) {
+			samplerflags |= BGFX_SAMPLER_POINT;
+		}
 		state |= BGFX_STATE_BLEND_ALPHA;
 	} else if (!bgfx::isValid(_LightLut)) {
 		return;
@@ -329,8 +335,8 @@ static void Submit_Terrain(bgfx::ViewId view, RemasterTerrainVertex const * terr
 	}
 
 	int offset = 0;
-	while (offset + 3 <= terraincount) {
-		uint32_t available = bgfx::getAvailTransientVertexBuffer((uint32_t)(terraincount - offset), _VertexLayout);
+	while (offset + 3 <= layer.Count) {
+		uint32_t available = bgfx::getAvailTransientVertexBuffer((uint32_t)(layer.Count - offset), _VertexLayout);
 		available -= available % 3;
 		if (available < 3) {
 			break;
@@ -340,7 +346,7 @@ static void Submit_Terrain(bgfx::ViewId view, RemasterTerrainVertex const * terr
 		bgfx::allocTransientVertexBuffer(&buffer, available, _VertexLayout);
 		BackendVertex * vertex = (BackendVertex *)buffer.data;
 		for (uint32_t i = 0; i < available; i++) {
-			RemasterTerrainVertex const & source = terrain[offset + (int)i];
+			RemasterTerrainVertex const & source = layer.Verts[offset + (int)i];
 			vertex[i].X = destx + source.X * scalex;
 			vertex[i].Y = desty + source.Y * scaley;
 			vertex[i].U = source.U;
@@ -356,6 +362,18 @@ static void Submit_Terrain(bgfx::ViewId view, RemasterTerrainVertex const * terr
 		bgfx::setState(state);
 		bgfx::submit(view, _Program);
 		offset += (int)available;
+	}
+}
+
+
+static void Submit_Terrain_Layers(bgfx::ViewId view, RemasterTerrainLayer const * layers, int layercount, float destx, float desty, float scalex, float scaley, int clipx, int clipy, int clipw, int cliph, bool textured)
+{
+	if (layers == NULL) {
+		return;
+	}
+
+	for (int i = 0; i < layercount; i++) {
+		Submit_Terrain_Layer(view, layers[i], i, destx, desty, scalex, scaley, clipx, clipy, clipw, cliph, textured);
 	}
 }
 
@@ -449,6 +467,13 @@ bool Backend_Init(NativeWindow const & window, int drawablewidth, int drawablehe
 {
 	if (_Initialized) {
 		return(true);
+	}
+
+	for (int i = 0; i < REMASTER_LAYER_MAX; i++) {
+		_LayerGpu[i] = BGFX_INVALID_HANDLE;
+		_LayerGpuW[i] = 0;
+		_LayerGpuH[i] = 0;
+		_LayerGpuSerial[i] = 0;
 	}
 
 	// Presents happen at whatever depth the engine has reached, including from inside a
@@ -553,9 +578,14 @@ void Backend_Shutdown(void)
 		bgfx::destroy(_LightLut);
 		_LightLut = BGFX_INVALID_HANDLE;
 	}
-	if (bgfx::isValid(_TileAtlas)) {
-		bgfx::destroy(_TileAtlas);
-		_TileAtlas = BGFX_INVALID_HANDLE;
+	for (int i = 0; i < REMASTER_LAYER_MAX; i++) {
+		if (bgfx::isValid(_LayerGpu[i])) {
+			bgfx::destroy(_LayerGpu[i]);
+			_LayerGpu[i] = BGFX_INVALID_HANDLE;
+		}
+		_LayerGpuW[i] = 0;
+		_LayerGpuH[i] = 0;
+		_LayerGpuSerial[i] = 0;
 	}
 	if (bgfx::isValid(_FrameTexture)) {
 		bgfx::destroy(_FrameTexture);
@@ -577,9 +607,6 @@ void Backend_Shutdown(void)
 
 	_FrameWidth = 0;
 	_FrameHeight = 0;
-	_TileAtlasWidth = 0;
-	_TileAtlasHeight = 0;
-	_TileAtlasSerial = 0;
 	_Initialized = false;
 }
 
@@ -666,7 +693,7 @@ void Backend_On_Resize(int drawablewidth, int drawableheight)
 /// <param name="destwidth">How wide the frame is drawn.</param>
 /// <param name="destheight">How tall the frame is drawn.</param>
 /// <param name="mode">How the frame is filtered when it is drawn larger than it is.</param>
-void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainVertex const * terrain, int terraincount, Rect const & terrainclip, unsigned int const * atlas, int atlaswidth, int atlasheight, bool textured, unsigned int atlasserial)
+void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainLayer const * layers, int layercount, Rect const & terrainclip, bool textured)
 {
 	if (!_Initialized || pixels == NULL || !bgfx::isValid(_FrameTexture)) {
 		return;
@@ -677,7 +704,13 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 		return;
 	}
 
-	bool const remaster = terraincount >= 3 && terrain != NULL && bgfx::isValid(_OverlayTexture) && _ConvertBuffer != NULL;
+	int terraincount = 0;
+	for (int i = 0; i < layercount; i++) {
+		if (layers != NULL) {
+			terraincount += layers[i].Count;
+		}
+	}
+	bool const remaster = terraincount >= 3 && layers != NULL && bgfx::isValid(_OverlayTexture) && _ConvertBuffer != NULL;
 	if (remaster) {
 		for (int y = 0; y < _FrameHeight; y++) {
 			unsigned short const * source = (unsigned short const *)((char const *)pixels + y * pitch);
@@ -729,7 +762,7 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 				if (remaster) {
 					float scalex = (float)_PrescaleWidth / (float)_FrameWidth;
 					float scaleypx = (float)_PrescaleHeight / (float)_FrameHeight;
-					Submit_Terrain(VIEW_PRESCALE, terrain, terraincount, 0.0f, 0.0f, scalex, scaleypx, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height, atlas, atlaswidth, atlasheight, textured, atlasserial);
+					Submit_Terrain_Layers(VIEW_PRESCALE, layers, layercount, 0.0f, 0.0f, scalex, scaleypx, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height, textured);
 					Submit_Quad(VIEW_PRESCALE, _OverlayTexture, 0.0f, 0.0f, (float)_PrescaleWidth, (float)_PrescaleHeight, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT, false, BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
 				} else {
 					Submit_Quad(VIEW_PRESCALE, _FrameTexture, 0.0f, 0.0f, (float)_PrescaleWidth, (float)_PrescaleHeight, BGFX_SAMPLER_U_CLAMP | BGFX_SAMPLER_V_CLAMP | BGFX_SAMPLER_POINT);
@@ -750,7 +783,7 @@ void Backend_Present(void const * pixels, int pitch, int destx, int desty, int d
 	if (remaster && !from_prescale) {
 		float scalex = (float)destwidth / (float)_FrameWidth;
 		float scaley = (float)destheight / (float)_FrameHeight;
-		Submit_Terrain(VIEW_PRESENT, terrain, terraincount, (float)destx, (float)desty, scalex, scaley, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height, atlas, atlaswidth, atlasheight, textured, atlasserial);
+		Submit_Terrain_Layers(VIEW_PRESENT, layers, layercount, (float)destx, (float)desty, scalex, scaley, terrainclip.X, terrainclip.Y, terrainclip.Width, terrainclip.Height, textured);
 		Submit_Quad(VIEW_PRESENT, source, (float)destx, (float)desty, (float)destwidth, (float)destheight, samplerflags, false, BGFX_STATE_WRITE_RGB | BGFX_STATE_WRITE_A | BGFX_STATE_BLEND_ALPHA);
 	} else {
 		Submit_Quad(VIEW_PRESENT, source, (float)destx, (float)desty, (float)destwidth, (float)destheight, samplerflags, flipv);

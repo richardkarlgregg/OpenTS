@@ -318,7 +318,22 @@ static bool Write_Png_Bgra(std::string const & path, unsigned int const * pixels
 }
 
 
-static bool Load_With_Wic(std::string const & path, RemasterTileFile & out)
+static int const TILE_IMAGE_MAX = 4096;
+
+
+static unsigned int Next_Image_Serial(void)
+{
+	static unsigned int serial = 1;
+	unsigned int value = serial;
+	serial += 1;
+	if (serial == 0) {
+		serial = 1;
+	}
+	return(value);
+}
+
+
+static bool Load_With_Wic(std::string const & path, std::vector<unsigned int> & pixels, int & width_out, int & height_out, int max_dim)
 {
 	IWICImagingFactory * factory = NULL;
 	IWICBitmapDecoder * decoder = NULL;
@@ -347,18 +362,19 @@ static bool Load_With_Wic(std::string const & path, RemasterTileFile & out)
 
 	UINT width = 0;
 	UINT height = 0;
+	bool ok = false;
 	if (SUCCEEDED(hr)) {
 		hr = converter->GetSize(&width, &height);
 	}
-	if (SUCCEEDED(hr) && width > 0 && height > 0 && width <= 2048 && height <= 2048) {
-		out.Diffuse.assign((std::size_t)width * (std::size_t)height, 0);
-		hr = converter->CopyPixels(NULL, width * 4, (UINT)(out.Diffuse.size() * 4u), (BYTE *)out.Diffuse.data());
+	if (SUCCEEDED(hr) && width > 0 && height > 0 && (int)width <= max_dim && (int)height <= max_dim) {
+		pixels.assign((std::size_t)width * (std::size_t)height, 0);
+		hr = converter->CopyPixels(NULL, width * 4, (UINT)(pixels.size() * 4u), (BYTE *)pixels.data());
 		if (SUCCEEDED(hr)) {
-			out.DiffuseW = (int)width;
-			out.DiffuseH = (int)height;
-			out.HasDiffuse = true;
+			width_out = (int)width;
+			height_out = (int)height;
+			ok = true;
 		} else {
-			out.Diffuse.clear();
+			pixels.clear();
 		}
 	}
 
@@ -372,11 +388,11 @@ static bool Load_With_Wic(std::string const & path, RemasterTileFile & out)
 		decoder->Release();
 	}
 	factory->Release();
-	return(out.HasDiffuse);
+	return(ok);
 }
 
 
-static bool Load_Tga(std::string const & path, RemasterTileFile & out)
+static bool Load_Tga(std::string const & path, std::vector<unsigned int> & pixels, int & width_out, int & height_out, int max_dim)
 {
 	FILE * file = std::fopen(path.c_str(), "rb");
 	if (file == NULL) {
@@ -393,7 +409,7 @@ static bool Load_Tga(std::string const & path, RemasterTileFile & out)
 	int height = header[14] | (header[15] << 8);
 	int bits = header[16];
 	int image = header[2];
-	if ((image != 2 && image != 3) || width <= 0 || height <= 0 || width > 2048 || height > 2048 || (bits != 24 && bits != 32 && bits != 8)) {
+	if ((image != 2 && image != 3) || width <= 0 || height <= 0 || width > max_dim || height > max_dim || (bits != 24 && bits != 32 && bits != 8)) {
 		std::fclose(file);
 		return(false);
 	}
@@ -402,14 +418,14 @@ static bool Load_Tga(std::string const & path, RemasterTileFile & out)
 		std::fseek(file, header[0], SEEK_CUR);
 	}
 
-	out.Diffuse.assign((std::size_t)width * (std::size_t)height, 0);
+	pixels.assign((std::size_t)width * (std::size_t)height, 0);
 	int bpp = bits / 8;
 	std::vector<unsigned char> row((std::size_t)width * (std::size_t)bpp);
 	bool flip = (header[17] & 0x20) == 0;
 	for (int y = 0; y < height; y++) {
 		if (std::fread(row.data(), 1, row.size(), file) != row.size()) {
 			std::fclose(file);
-			out.Diffuse.clear();
+			pixels.clear();
 			return(false);
 		}
 
@@ -424,14 +440,19 @@ static bool Load_Tga(std::string const & path, RemasterTileFile & out)
 			} else {
 				pixel = ((unsigned int)src[3] << 24) | ((unsigned int)src[2] << 16) | ((unsigned int)src[1] << 8) | src[0];
 			}
-			out.Diffuse[desty * width + x] = pixel;
+			pixels[desty * width + x] = pixel;
 		}
 	}
 	std::fclose(file);
-	out.DiffuseW = width;
-	out.DiffuseH = height;
-	out.HasDiffuse = true;
+	width_out = width;
+	height_out = height;
 	return(true);
+}
+
+
+static bool Load_Image_File(std::string const & path, std::vector<unsigned int> & pixels, int & width, int & height, int max_dim)
+{
+	return(Load_With_Wic(path, pixels, width, height, max_dim) || Load_Tga(path, pixels, width, height, max_dim));
 }
 
 
@@ -445,13 +466,42 @@ static bool Load_Diffuse(std::string const & stem, RemasterTileFile & out)
 		}
 
 		out.HasDiffuse = false;
-		if (Load_With_Wic(path, out) || Load_Tga(path, out)) {
+		if (Load_Image_File(path, out.Diffuse, out.DiffuseW, out.DiffuseH, TILE_IMAGE_MAX)) {
+			out.HasDiffuse = true;
 			out.DiffusePath = path;
 			out.DiffuseWriteTime = File_Write_Time(path);
+			out.ImageSerial = Next_Image_Serial();
 			return(true);
 		}
 	}
 	return(false);
+}
+
+
+static bool Load_Map_Image(std::string const & stem, char const * const * suffixes, int suffix_count, std::vector<unsigned int> & pixels, int & width, int & height)
+{
+	for (int i = 0; i < suffix_count; i++) {
+		std::string path = stem + suffixes[i];
+		if (!File_Exists(path)) {
+			continue;
+		}
+
+		if (Load_Image_File(path, pixels, width, height, TILE_IMAGE_MAX)) {
+			return(true);
+		}
+	}
+	return(false);
+}
+
+
+static void Load_Detail_Maps(std::string const & stem, RemasterTileFile & out)
+{
+	static char const * normal_suffixes[] = { "_normal.png", "_normal.tga", "_normal.bmp" };
+	static char const * spec_suffixes[] = { "_specular.png", "_specular.tga", "_spec.png" };
+	static char const * height_suffixes[] = { "_height.png", "_height.tga", "_disp.png" };
+	out.HasNormal = Load_Map_Image(stem, normal_suffixes, 3, out.Normal, out.NormalW, out.NormalH);
+	out.HasSpecular = Load_Map_Image(stem, spec_suffixes, 3, out.Specular, out.SpecularW, out.SpecularH);
+	out.HasHeight = Load_Map_Image(stem, height_suffixes, 3, out.Height, out.HeightW, out.HeightH);
 }
 
 
@@ -667,10 +717,22 @@ bool Remaster_Read_Tile_Files(char const * ininame, int subtile, int icon, Remas
 	out = RemasterTileFile();
 	out.DiffuseW = 0;
 	out.DiffuseH = 0;
+	out.NormalW = 0;
+	out.NormalH = 0;
+	out.SpecularW = 0;
+	out.SpecularH = 0;
+	out.HeightW = 0;
+	out.HeightH = 0;
+	out.AtlasX = -1;
+	out.AtlasY = -1;
+	out.ImageSerial = 0;
 	out.MeshWriteTime = 0;
 	out.DiffuseWriteTime = 0;
 	out.HasMesh = false;
 	out.HasDiffuse = false;
+	out.HasNormal = false;
+	out.HasSpecular = false;
+	out.HasHeight = false;
 	out.IsSet = false;
 	out.MeshPath.clear();
 	out.DiffusePath.clear();
@@ -686,7 +748,8 @@ bool Remaster_Read_Tile_Files(char const * ininame, int subtile, int icon, Remas
 			Load_Diffuse(stem, out);
 		}
 		if (out.HasMesh || out.HasDiffuse) {
-			if (subtile < 0 && out.HasMesh) {
+			Load_Detail_Maps(stem, out);
+			if (subtile < 0) {
 				out.IsSet = true;
 			}
 			return(true);
@@ -716,6 +779,7 @@ static bool Write_Obj_Mtl(char const * ininame, int subtile, RemasterTileFile co
 	std::fprintf(file, "# OpenTS remaster tile %s %s\n", Sanitize_Name(ininame).c_str(), leaf.c_str());
 	if (subtile < 0 || mesh.IsSet) {
 		std::fprintf(file, "# X east in cells from the north-west sub-tile, Y south in cells, Z height levels from the tile file\n");
+		std::fprintf(file, "# PNG slot index is x + MapWidth*y, same as IsoTileTypeClass::SubTile_Index; row 0 is north\n");
 	} else {
 		std::fprintf(file, "# X east 0-1, Y south 0-1, Z height levels above the cell Height\n");
 	}

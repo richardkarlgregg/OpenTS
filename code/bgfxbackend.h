@@ -43,6 +43,6 @@ void Backend_On_Resize(int drawablewidth, int drawableheight);
 // Uploads the frame and presents it. The pixels are 16 bit 565 and stay owned by the
 // caller; they are consumed before this returns. Terrain vertices, when present, are
 // drawn first and magenta 565 pixels in the frame become transparent over them.
-void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainVertex const * terrain, int terraincount, Rect const & terrainclip, unsigned int const * atlas, int atlaswidth, int atlasheight, bool textured, unsigned int atlasserial);
+void Backend_Present(void const * pixels, int pitch, int destx, int desty, int destwidth, int destheight, BackendScaleMode mode, RemasterTerrainLayer const * layers, int layercount, Rect const & terrainclip, bool textured);
 
 char const * Backend_Renderer_Name(void);

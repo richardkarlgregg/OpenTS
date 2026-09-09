@@ -275,18 +275,14 @@ void Video_Present(void)
 		return;
 	}
 
-	RemasterTerrainVertex const * terrain = NULL;
-	int terraincount = 0;
+	RemasterTerrainLayer layers[REMASTER_LAYER_MAX];
+	int layercount = 0;
 	Rect terrainclip;
-	unsigned int const * atlas = NULL;
-	int atlaswidth = 0;
-	int atlasheight = 0;
 	bool textured = false;
-	unsigned int atlasserial = 0;
-	Remaster_Fetch_Terrain(terrain, terraincount, terrainclip, atlas, atlaswidth, atlasheight, textured, atlasserial);
+	Remaster_Fetch_Terrain(layers, layercount, terrainclip, textured);
 
 	_Presenting = true;
-	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode(), terrain, terraincount, terrainclip, atlas, atlaswidth, atlasheight, textured, atlasserial);
+	Backend_Present(pixels, surface->Stride(), _ScaleInfo.DestX, _ScaleInfo.DestY, _ScaleInfo.DestWidth, _ScaleInfo.DestHeight, Backend_Scale_Mode(), layers, layercount, terrainclip, textured);
 	_Presenting = false;
 
 	_FrameIsDirty = false;

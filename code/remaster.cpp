@@ -92,6 +92,11 @@ static int _ExtraRowH = 0;
 static unsigned int _AtlasSerial = 1;
 static bool _AtlasOverflow = false;
 static std::map<std::string, RemasterTileFile> _TileFiles;
+static std::vector<unsigned char> _VertLayer;
+static RemasterTileFile const * _LayerSource[REMASTER_LAYER_MAX];
+static int _LayerUsed = 1;
+static int _EmitLayer = 0;
+static std::vector<RemasterTerrainVertex> _LayerOut[REMASTER_LAYER_MAX];
 
 
 static int const DIAMOND_W = 48;
@@ -143,6 +148,10 @@ struct AtlasSlot
 	int ExtraY;
 	int ExtraW;
 	int ExtraH;
+	int ExtraCropX;
+	int ExtraCropY;
+	int ExtraCropW;
+	int ExtraCropH;
 	int BlitDX;
 	int BlitDY;
 };
@@ -154,6 +163,22 @@ static std::vector<AtlasSlot> _Slots;
 static void Seal_White_Texel(void);
 static void White_UV(float & u, float & v);
 static bool Extra_Screen_Rect(CellClass const & cell, Rect & out);
+static int Bake_Tile_Slot(CellClass const & cell);
+
+
+static void Reset_Terrain_Layers(void)
+{
+	_VertLayer.clear();
+	_EmitLayer = 0;
+	_LayerUsed = 1;
+	_LayerSource[0] = NULL;
+	for (int i = 0; i < REMASTER_LAYER_MAX; i++) {
+		_LayerOut[i].clear();
+		if (i > 0) {
+			_LayerSource[i] = NULL;
+		}
+	}
+}
 
 
 static void Clear_Atlas(void)
@@ -166,6 +191,10 @@ static void Clear_Atlas(void)
 	_ExtraY = 0;
 	_ExtraRowH = 0;
 	_AtlasSerial += 1;
+	for (auto & entry : _TileFiles) {
+		entry.second.AtlasX = -1;
+		entry.second.AtlasY = -1;
+	}
 }
 
 
@@ -224,6 +253,7 @@ void Toggle_Remastered_Graphics(void)
 		_TerrainVerts.clear();
 		_BaseVerts.clear();
 		_LampSamples.clear();
+		Reset_Terrain_Layers();
 		_MeshValid = false;
 		_TerrainClip = Rect();
 		_MouseLight = false;
@@ -867,6 +897,55 @@ static bool Pack_Extra_Rect(int width, int height, int & destx, int & desty)
 }
 
 
+static void Spread_Rgba_Rect(unsigned int * dest, int destw, int destx, int desty, int width, int height)
+{
+	if (dest == NULL || destw < 1 || width < 1 || height < 1) {
+		return;
+	}
+
+	for (int y = 0; y < height; y++) {
+		unsigned int run = 0;
+		for (int x = 0; x < width; x++) {
+			unsigned int & pixel = dest[(size_t)(desty + y) * (size_t)destw + (size_t)(destx + x)];
+			if (pixel != 0) {
+				run = pixel;
+			} else if (run != 0) {
+				pixel = run;
+			}
+		}
+		run = 0;
+		for (int x = width - 1; x >= 0; x--) {
+			unsigned int & pixel = dest[(size_t)(desty + y) * (size_t)destw + (size_t)(destx + x)];
+			if (pixel != 0) {
+				run = pixel;
+			} else if (run != 0) {
+				pixel = run;
+			}
+		}
+	}
+	for (int x = 0; x < width; x++) {
+		unsigned int run = 0;
+		for (int y = 0; y < height; y++) {
+			unsigned int & pixel = dest[(size_t)(desty + y) * (size_t)destw + (size_t)(destx + x)];
+			if (pixel != 0) {
+				run = pixel;
+			} else if (run != 0) {
+				pixel = run;
+			}
+		}
+		run = 0;
+		for (int y = height - 1; y >= 0; y--) {
+			unsigned int & pixel = dest[(size_t)(desty + y) * (size_t)destw + (size_t)(destx + x)];
+			if (pixel != 0) {
+				run = pixel;
+			} else if (run != 0) {
+				pixel = run;
+			}
+		}
+	}
+}
+
+
 static void Dilate_Opaque(int destx, int desty, int width, int height)
 {
 	std::vector<unsigned int> snapshot((size_t)width * (size_t)height);
@@ -905,46 +984,11 @@ static void Dilate_Opaque(int destx, int desty, int width, int height)
 
 static void Spread_Opaque(int destx, int desty, int width, int height)
 {
-	for (int y = 0; y < height; y++) {
-		unsigned int run = 0;
-		for (int x = 0; x < width; x++) {
-			unsigned int & pixel = _AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)];
-			if (pixel != 0) {
-				run = pixel;
-			} else if (run != 0) {
-				pixel = run;
-			}
-		}
-		run = 0;
-		for (int x = width - 1; x >= 0; x--) {
-			unsigned int & pixel = _AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)];
-			if (pixel != 0) {
-				run = pixel;
-			} else if (run != 0) {
-				pixel = run;
-			}
-		}
+	if (_AtlasPixels.empty()) {
+		return;
 	}
-	for (int x = 0; x < width; x++) {
-		unsigned int run = 0;
-		for (int y = 0; y < height; y++) {
-			unsigned int & pixel = _AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)];
-			if (pixel != 0) {
-				run = pixel;
-			} else if (run != 0) {
-				pixel = run;
-			}
-		}
-		run = 0;
-		for (int y = height - 1; y >= 0; y--) {
-			unsigned int & pixel = _AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)];
-			if (pixel != 0) {
-				run = pixel;
-			} else if (run != 0) {
-				pixel = run;
-			}
-		}
-	}
+
+	Spread_Rgba_Rect(_AtlasPixels.data(), _AtlasWidth, destx, desty, width, height);
 }
 
 
@@ -959,6 +1003,54 @@ static int Find_Slot(int heap, int subtile, int icon, LightConvertClass * drawer
 }
 
 
+static bool Pack_Tileset_Diffuse(RemasterTileFile & file)
+{
+	if (!file.HasDiffuse || file.Diffuse.empty() || file.DiffuseW < 1 || file.DiffuseH < 1) {
+		return(false);
+	}
+	if (file.AtlasX >= 0 && file.AtlasY >= 0) {
+		return(true);
+	}
+	if (_AtlasPixels.empty() || _AtlasWidth < 1) {
+		return(false);
+	}
+
+	int destx = 0;
+	int desty = 0;
+	if (!Pack_Extra_Rect(file.DiffuseW, file.DiffuseH, destx, desty)) {
+		return(false);
+	}
+
+	for (int y = 0; y < file.DiffuseH; y++) {
+		for (int x = 0; x < file.DiffuseW; x++) {
+			unsigned int pixel = file.Diffuse[(size_t)y * (size_t)file.DiffuseW + (size_t)x];
+			if ((pixel & 0x00FFFFFFu) != 0) {
+				pixel |= 0xFF000000u;
+			}
+			_AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)] = pixel;
+		}
+	}
+	file.AtlasX = destx;
+	file.AtlasY = desty;
+	return(true);
+}
+
+
+static RemasterTileFile * Cached_Tile_File(char const * ininame, int subtile, int icon, bool & cached)
+{
+	char key[80];
+	std::snprintf(key, sizeof(key), "%s/%d/%d", ininame, subtile, icon);
+	auto found = _TileFiles.find(key);
+	if (found != _TileFiles.end()) {
+		cached = true;
+		return(&found->second);
+	}
+
+	cached = false;
+	return(&_TileFiles[key]);
+}
+
+
 static RemasterTileFile const * Fetch_Tile_File(CellClass const & cell)
 {
 	IsometricTileTypeClass * ittype = NULL;
@@ -969,26 +1061,26 @@ static RemasterTileFile const * Fetch_Tile_File(CellClass const & cell)
 		return(NULL);
 	}
 
-	char key[80];
-	std::snprintf(key, sizeof(key), "%s/%d/%d", (char const *)ittype->IniName, subtile, icon);
-	auto found = _TileFiles.find(key);
-	if (found != _TileFiles.end()) {
-		if (found->second.HasMesh || found->second.HasDiffuse) {
-			return(&found->second);
+	char const * ininame = (char const *)ittype->IniName;
+	bool set_cached = false;
+	RemasterTileFile * set = Cached_Tile_File(ininame, -1, icon, set_cached);
+	if (!set_cached && !Remaster_Read_Tile_Files(ininame, -1, icon, *set)) {
+		*set = RemasterTileFile();
+	}
+	if (set->HasMesh || set->HasDiffuse) {
+		if (set->HasDiffuse) {
+			Pack_Tileset_Diffuse(*set);
 		}
-		return(NULL);
+		return(set);
 	}
 
-	RemasterTileFile & entry = _TileFiles[key];
-	if (!Remaster_Read_Tile_Files(ittype->IniName, subtile, icon, entry)) {
-		return(NULL);
+	bool piece_cached = false;
+	RemasterTileFile * piece = Cached_Tile_File(ininame, subtile, icon, piece_cached);
+	if (!piece_cached && !Remaster_Read_Tile_Files(ininame, subtile, icon, *piece)) {
+		*piece = RemasterTileFile();
 	}
-	if (entry.IsSet) {
-		entry = RemasterTileFile();
-		return(NULL);
-	}
-	if (entry.HasMesh || entry.HasDiffuse) {
-		return(&entry);
+	if (piece->HasMesh || piece->HasDiffuse) {
+		return(piece);
 	}
 	return(NULL);
 }
@@ -1064,7 +1156,112 @@ static bool Fill_Unprojected_Rgba(CellClass const & cell, unsigned int * dest)
 			dest[y * TILE_SLOT + x] = pixel;
 		}
 	}
+	Spread_Rgba_Rect(dest, TILE_SLOT, 0, 0, TILE_SLOT, TILE_SLOT);
 	return(true);
+}
+
+
+static int Count_Opaque_Slot(int destx, int desty)
+{
+	int count = 0;
+	for (int y = 0; y < TILE_SLOT; y++) {
+		for (int x = 0; x < TILE_SLOT; x++) {
+			if (_AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)] != 0) {
+				count += 1;
+			}
+		}
+	}
+
+	return(count);
+}
+
+
+static void Copy_Slot_Into_Gaps(int destx, int desty, int src_slot)
+{
+	if (src_slot < 0 || src_slot >= (int)_Slots.size()) {
+		return;
+	}
+
+	int sx0 = (src_slot % ATLAS_COLS) * TILE_SLOT;
+	int sy0 = (src_slot / ATLAS_COLS) * TILE_SLOT;
+	for (int y = 0; y < TILE_SLOT; y++) {
+		for (int x = 0; x < TILE_SLOT; x++) {
+			unsigned int & dest = _AtlasPixels[(size_t)(desty + y) * (size_t)_AtlasWidth + (size_t)(destx + x)];
+			if (dest != 0) {
+				continue;
+			}
+
+			unsigned int src = _AtlasPixels[(size_t)(sy0 + y) * (size_t)_AtlasWidth + (size_t)(sx0 + x)];
+			if (src != 0) {
+				dest = src;
+			}
+		}
+	}
+}
+
+
+static bool Record_Has_Extra(IsoTileRecord const * record)
+{
+	return(record != NULL && record->IsHasExtraData != 0 && record->ExtraWidth > 0 && record->ExtraHeight > 0);
+}
+
+
+static void Fill_Cliff_Top_Gaps(CellClass const & cell, int destx, int desty)
+{
+	Cell const id = cell.Fetch_CellID();
+	int const dx[4] = { 0, 1, -1, 0 };
+	int const dy[4] = { 1, 0, 0, -1 };
+	int best_slot = -1;
+	int best_opaque = -1;
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < 4; i++) {
+			Cell nid(id.X + dx[i], id.Y + dy[i]);
+			if (!Map.In_Radar(nid)) {
+				continue;
+			}
+
+			CellClass const & ncell = Map[nid];
+			if (ncell.Height < cell.Height) {
+				continue;
+			}
+
+			IsometricTileTypeClass * ittype = NULL;
+			int icon = 0;
+			int subtile = 0;
+			ncell.Fetch_Icon(ittype, subtile, &icon, true);
+			if (ittype == NULL) {
+				continue;
+			}
+
+			IsometricTileTypeClass const * art = Tile_Variation(ittype, icon);
+			if (art == NULL || art->Get_Image_Data() == NULL) {
+				continue;
+			}
+
+			IsoTileSet const * set = (IsoTileSet const *)art->Get_Image_Data();
+			bool has_extra = Record_Has_Extra(File_Subtile(set, subtile));
+			if (pass == 0 && has_extra) {
+				continue;
+			}
+
+			int ns = Bake_Tile_Slot(ncell);
+			if (ns < 0) {
+				continue;
+			}
+
+			int opaque = Count_Opaque_Slot((ns % ATLAS_COLS) * TILE_SLOT, (ns / ATLAS_COLS) * TILE_SLOT);
+			if (opaque > best_opaque) {
+				best_opaque = opaque;
+				best_slot = ns;
+			}
+		}
+		if (best_slot >= 0 && pass == 0) {
+			break;
+		}
+	}
+	if (best_slot >= 0) {
+		Copy_Slot_Into_Gaps(destx, desty, best_slot);
+	}
 }
 
 
@@ -1137,14 +1334,15 @@ static int Bake_Tile_Slot(CellClass const & cell)
 		}
 	}
 	RemasterTileFile const * replace = Fetch_Tile_File(cell);
-	if (replace != NULL && replace->HasDiffuse) {
+	if (replace != NULL && replace->HasDiffuse && !replace->IsSet) {
 		Blit_Rgba_To_Slot(replace->Diffuse.data(), replace->DiffuseW, replace->DiffuseH, destx, desty);
 	}
 	if (record->IsHasExtraData && record->ExtraWidth > 0 && record->ExtraHeight > 0 && !cell.Is_Tile_Ramp()) {
-		Dilate_Opaque(destx, desty, TILE_SLOT, TILE_SLOT);
-	} else {
-		Spread_Opaque(destx, desty, TILE_SLOT, TILE_SLOT);
+		if (Count_Opaque_Slot(destx, desty) < TILE_SLOT * TILE_SLOT * 3 / 4) {
+			Fill_Cliff_Top_Gaps(cell, destx, desty);
+		}
 	}
+	Spread_Opaque(destx, desty, TILE_SLOT, TILE_SLOT);
 
 	AtlasSlot slot;
 	slot.Heap = heap;
@@ -1156,6 +1354,10 @@ static int Bake_Tile_Slot(CellClass const & cell)
 	slot.ExtraY = 0;
 	slot.ExtraW = 0;
 	slot.ExtraH = 0;
+	slot.ExtraCropX = 0;
+	slot.ExtraCropY = 0;
+	slot.ExtraCropW = 0;
+	slot.ExtraCropH = 0;
 	slot.BlitDX = 0;
 	slot.BlitDY = 0;
 
@@ -1164,12 +1366,28 @@ static int Bake_Tile_Slot(CellClass const & cell)
 		int ey = 0;
 		if (Pack_Extra_Rect(record->ExtraWidth, record->ExtraHeight, ex, ey)) {
 			unsigned char const * extra = (unsigned char const *)record + record->ExtraOffset;
+			int x0 = record->ExtraWidth;
+			int y0 = record->ExtraHeight;
+			int x1 = -1;
+			int y1 = -1;
 			for (int y = 0; y < record->ExtraHeight; y++) {
 				for (int x = 0; x < record->ExtraWidth; x++) {
 					unsigned char src = extra[y * record->ExtraWidth + x];
 					unsigned int pixel = 0;
 					if (src != 0) {
 						pixel = Pixel_565_To_BGRA(table[src]);
+						if (x < x0) {
+							x0 = x;
+						}
+						if (y < y0) {
+							y0 = y;
+						}
+						if (x > x1) {
+							x1 = x;
+						}
+						if (y > y1) {
+							y1 = y;
+						}
 					}
 					_AtlasPixels[(size_t)(ey + y) * (size_t)_AtlasWidth + (size_t)(ex + x)] = pixel;
 				}
@@ -1180,6 +1398,12 @@ static int Bake_Tile_Slot(CellClass const & cell)
 			slot.ExtraH = record->ExtraHeight;
 			slot.BlitDX = record->ExtraX - record->X;
 			slot.BlitDY = record->ExtraY - record->Y;
+			if (x1 >= 0) {
+				slot.ExtraCropX = x0;
+				slot.ExtraCropY = y0;
+				slot.ExtraCropW = x1 - x0 + 1;
+				slot.ExtraCropH = y1 - y0 + 1;
+			}
 		}
 	}
 
@@ -1231,6 +1455,67 @@ static void Extra_Atlas_UV(int slot, int corner, float & u, float & v)
 	}
 	u = x / (float)_AtlasWidth;
 	v = y / (float)_AtlasHeight;
+}
+
+
+static void Extra_Wall_UV(int slot, float edge_t, float drop_t, float & u, float & v)
+{
+	if (slot < 0 || slot >= (int)_Slots.size() || _Slots[slot].ExtraCropW < 1 || _Slots[slot].ExtraCropH < 1) {
+		White_UV(u, v);
+		return;
+	}
+
+	AtlasSlot const & packed = _Slots[slot];
+	u = ((float)(packed.ExtraX + packed.ExtraCropX) + 0.5f + edge_t * ((float)packed.ExtraCropW - 1.0f)) / (float)_AtlasWidth;
+	v = ((float)(packed.ExtraY + packed.ExtraCropY) + 0.5f + drop_t * ((float)packed.ExtraCropH - 1.0f)) / (float)_AtlasHeight;
+}
+
+
+static float Clamp_01(float value)
+{
+	if (value < 0.0f) {
+		return(0.0f);
+	}
+	if (value > 1.0f) {
+		return(1.0f);
+	}
+
+	return(value);
+}
+
+
+static bool Extra_Corner_In_Crop(int slot, Rect const & extra, RemasterCorner const & corner)
+{
+	if (slot < 0 || slot >= (int)_Slots.size() || _Slots[slot].ExtraCropW < 1 || _Slots[slot].ExtraCropH < 1 || extra.Width < 1 || extra.Height < 1) {
+		return(false);
+	}
+
+	AtlasSlot const & packed = _Slots[slot];
+	float tu = (corner.SX - ((float)extra.X + (float)packed.ExtraCropX)) / (float)packed.ExtraCropW;
+	float tv = (corner.SY - ((float)extra.Y + (float)packed.ExtraCropY)) / (float)packed.ExtraCropH;
+	return(tu >= 0.0f && tu <= 1.0f && tv >= 0.0f && tv <= 1.0f);
+}
+
+
+static void Extra_Projected_UV(int slot, Rect const & extra, RemasterCorner const & corner, float & u, float & v)
+{
+	if (slot < 0 || slot >= (int)_Slots.size() || _Slots[slot].ExtraW < 1 || _Slots[slot].ExtraH < 1 || extra.Width < 1 || extra.Height < 1) {
+		White_UV(u, v);
+		return;
+	}
+
+	AtlasSlot const & packed = _Slots[slot];
+	if (packed.ExtraCropW < 1 || packed.ExtraCropH < 1) {
+		White_UV(u, v);
+		return;
+	}
+
+	float cx = (float)extra.X + (float)packed.ExtraCropX;
+	float cy = (float)extra.Y + (float)packed.ExtraCropY;
+	float tu = Clamp_01((corner.SX - cx) / (float)packed.ExtraCropW);
+	float tv = Clamp_01((corner.SY - cy) / (float)packed.ExtraCropH);
+	u = ((float)(packed.ExtraX + packed.ExtraCropX) + 0.5f + tu * ((float)packed.ExtraCropW - 1.0f)) / (float)_AtlasWidth;
+	v = ((float)(packed.ExtraY + packed.ExtraCropY) + 0.5f + tv * ((float)packed.ExtraCropH - 1.0f)) / (float)_AtlasHeight;
 }
 
 
@@ -1468,6 +1753,7 @@ static void Emit_Triangle(RemasterCorner const & a, RemasterCorner const & b, Re
 
 	unsigned int color = Lit_Color(r, g, bl, brightness, a, apply_sun, lighting_only);
 	_BaseVerts.push_back(Make_Terrain_Vertex(a, color, ua, va));
+	_VertLayer.push_back((unsigned char)_EmitLayer);
 	LampSample sample;
 	sample.X = a.X;
 	sample.Y = a.Y;
@@ -1480,6 +1766,7 @@ static void Emit_Triangle(RemasterCorner const & a, RemasterCorner const & b, Re
 
 	color = Lit_Color(r, g, bl, brightness, b, apply_sun, lighting_only);
 	_BaseVerts.push_back(Make_Terrain_Vertex(b, color, ub, vb));
+	_VertLayer.push_back((unsigned char)_EmitLayer);
 	sample.X = b.X;
 	sample.Y = b.Y;
 	sample.Z = b.Z;
@@ -1491,6 +1778,7 @@ static void Emit_Triangle(RemasterCorner const & a, RemasterCorner const & b, Re
 
 	color = Lit_Color(r, g, bl, brightness, c, apply_sun, lighting_only);
 	_BaseVerts.push_back(Make_Terrain_Vertex(c, color, uc, vc));
+	_VertLayer.push_back((unsigned char)_EmitLayer);
 	sample.X = c.X;
 	sample.Y = c.Y;
 	sample.Z = c.Z;
@@ -1569,7 +1857,39 @@ static RemasterCorner Mix_Corner(RemasterCorner const & a, RemasterCorner const 
 }
 
 
-static void Emit_Drop_Face(RemasterCorner const & high_a, RemasterCorner const & high_b, Cell const & neighbor, int nlocal_ax, int nlocal_ay, int nlocal_bx, int nlocal_by, int r, int g, int b, float brightness, unsigned short * chroma, int stride, Rect const & cliprect)
+static int Extra_Slot_Around(CellClass const & cell, int slot, CellClass const * & owner)
+{
+	owner = &cell;
+	if (slot >= 0 && slot < (int)_Slots.size() && _Slots[slot].ExtraCropW > 0) {
+		return(slot);
+	}
+
+	Cell const id = cell.Fetch_CellID();
+	int const dx[4] = { 1, -1, 0, 0 };
+	int const dy[4] = { 0, 0, 1, -1 };
+	for (int i = 0; i < 4; i++) {
+		Cell nid(id.X + dx[i], id.Y + dy[i]);
+		if (!Map.In_Radar(nid)) {
+			continue;
+		}
+
+		CellClass const & ncell = Map[nid];
+		if (ncell.ITType != cell.ITType) {
+			continue;
+		}
+
+		int ns = Bake_Tile_Slot(ncell);
+		if (ns >= 0 && ns < (int)_Slots.size() && _Slots[ns].ExtraCropW > 0) {
+			owner = &ncell;
+			return(ns);
+		}
+	}
+
+	return(slot);
+}
+
+
+static void Emit_Drop_Face(RemasterCorner const & high_a, RemasterCorner const & high_b, Cell const & neighbor, int nlocal_ax, int nlocal_ay, int nlocal_bx, int nlocal_by, int r, int g, int b, float brightness, unsigned short * chroma, int stride, Rect const & cliprect, int extra_slot, CellClass const * extra_cell)
 {
 	if (!Map.In_Radar(neighbor)) {
 		return;
@@ -1578,7 +1898,13 @@ static void Emit_Drop_Face(RemasterCorner const & high_a, RemasterCorner const &
 	CellClass const & ncell = Map[neighbor];
 	float za = (float)Own_Height(ncell, nlocal_ax, nlocal_ay);
 	float zb = (float)Own_Height(ncell, nlocal_bx, nlocal_by);
-	float drop = std::min(high_a.Z - za, high_b.Z - zb);
+	if (za > high_a.Z) {
+		za = high_a.Z;
+	}
+	if (zb > high_b.Z) {
+		zb = high_b.Z;
+	}
+	float drop = std::max(high_a.Z - za, high_b.Z - zb);
 	if (drop < (float)LEVEL_LEPTON_H * 0.5f) {
 		return;
 	}
@@ -1644,6 +1970,72 @@ static void Emit_Drop_Face(RemasterCorner const & high_a, RemasterCorner const &
 		float vd1 = va + (vd - va) * t1;
 		Emit_Triangle(top_a, top_b, bot_b, wr, wg, wb, brightness, chroma, stride, cliprect, ua, va0, ub, vb0, uc, vc1, apply_sun, false);
 		Emit_Triangle(top_a, bot_b, bot_a, wr, wg, wb, brightness, chroma, stride, cliprect, ua, va0, uc, vc1, ud, vd1, apply_sun, false);
+		if (chroma == NULL) {
+			top_a.NX = -top_a.NX;
+			top_a.NY = -top_a.NY;
+			top_a.NZ = -top_a.NZ;
+			top_b.NX = -top_b.NX;
+			top_b.NY = -top_b.NY;
+			top_b.NZ = -top_b.NZ;
+			bot_b.NX = -bot_b.NX;
+			bot_b.NY = -bot_b.NY;
+			bot_b.NZ = -bot_b.NZ;
+			bot_a.NX = -bot_a.NX;
+			bot_a.NY = -bot_a.NY;
+			bot_a.NZ = -bot_a.NZ;
+			Emit_Triangle(top_a, bot_b, top_b, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, uc, vc1, ub, vb0, apply_sun, false);
+			Emit_Triangle(top_a, bot_a, bot_b, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, ud, vd1, uc, vc1, apply_sun, false);
+		}
+	}
+
+	if (chroma != NULL || !apply_sun || extra_slot < 0 || extra_slot >= (int)_Slots.size() || _Slots[extra_slot].ExtraW < 1) {
+		return;
+	}
+
+	Rect extra_rect;
+	bool projected = extra_cell != NULL && Extra_Screen_Rect(*extra_cell, extra_rect)
+		&& Extra_Corner_In_Crop(extra_slot, extra_rect, wall[0])
+		&& Extra_Corner_In_Crop(extra_slot, extra_rect, wall[1])
+		&& Extra_Corner_In_Crop(extra_slot, extra_rect, wall[2])
+		&& Extra_Corner_In_Crop(extra_slot, extra_rect, wall[3]);
+	if (projected) {
+		Extra_Projected_UV(extra_slot, extra_rect, wall[0], ua, va);
+		Extra_Projected_UV(extra_slot, extra_rect, wall[1], ub, vb);
+		Extra_Projected_UV(extra_slot, extra_rect, wall[2], uc, vc);
+		Extra_Projected_UV(extra_slot, extra_rect, wall[3], ud, vd);
+	} else {
+		Extra_Wall_UV(extra_slot, 0.0f, 0.0f, ua, va);
+		Extra_Wall_UV(extra_slot, 1.0f, 0.0f, ub, vb);
+		Extra_Wall_UV(extra_slot, 1.0f, 1.0f, uc, vc);
+		Extra_Wall_UV(extra_slot, 0.0f, 1.0f, ud, vd);
+	}
+	for (band = 0; band < WALL_DIVS; band++) {
+		float t0 = (float)band / (float)WALL_DIVS;
+		float t1 = (float)(band + 1) / (float)WALL_DIVS;
+		RemasterCorner top_a = Mix_Corner(wall[0], wall[3], t0);
+		RemasterCorner top_b = Mix_Corner(wall[1], wall[2], t0);
+		RemasterCorner bot_b = Mix_Corner(wall[1], wall[2], t1);
+		RemasterCorner bot_a = Mix_Corner(wall[0], wall[3], t1);
+		float va0 = va + (vd - va) * t0;
+		float vb0 = vb + (vc - vb) * t0;
+		float vc1 = vb + (vc - vb) * t1;
+		float vd1 = va + (vd - va) * t1;
+		Emit_Triangle(top_a, top_b, bot_b, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, ub, vb0, uc, vc1, apply_sun, true);
+		Emit_Triangle(top_a, bot_b, bot_a, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, uc, vc1, ud, vd1, apply_sun, true);
+		top_a.NX = -top_a.NX;
+		top_a.NY = -top_a.NY;
+		top_a.NZ = -top_a.NZ;
+		top_b.NX = -top_b.NX;
+		top_b.NY = -top_b.NY;
+		top_b.NZ = -top_b.NZ;
+		bot_b.NX = -bot_b.NX;
+		bot_b.NY = -bot_b.NY;
+		bot_b.NZ = -bot_b.NZ;
+		bot_a.NX = -bot_a.NX;
+		bot_a.NY = -bot_a.NY;
+		bot_a.NZ = -bot_a.NZ;
+		Emit_Triangle(top_a, bot_b, top_b, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, uc, vc1, ub, vb0, apply_sun, true);
+		Emit_Triangle(top_a, bot_a, bot_b, wr, wg, wb, brightness, NULL, 0, cliprect, ua, va0, ud, vd1, uc, vc1, apply_sun, true);
 	}
 }
 
@@ -1885,6 +2277,134 @@ static bool Is_Tileset_Emit_Cell(CellClass const & cell)
 }
 
 
+static int Layer_For_File(RemasterTileFile const * file)
+{
+	if (file == NULL) {
+		return(0);
+	}
+
+	int i;
+	for (i = 1; i < _LayerUsed; i++) {
+		if (_LayerSource[i] == file) {
+			return(i);
+		}
+	}
+	if (_LayerUsed >= REMASTER_LAYER_MAX) {
+		return(0);
+	}
+
+	_LayerSource[_LayerUsed] = file;
+	int layer = _LayerUsed;
+	_LayerUsed += 1;
+	return(layer);
+}
+
+
+static unsigned int Sample_Map(std::vector<unsigned int> const & pixels, int width, int height, float u, float v)
+{
+	if (pixels.empty() || width < 1 || height < 1) {
+		return(0);
+	}
+
+	if (u < 0.0f) {
+		u = 0.0f;
+	} else if (u > 1.0f) {
+		u = 1.0f;
+	}
+	if (v < 0.0f) {
+		v = 0.0f;
+	} else if (v > 1.0f) {
+		v = 1.0f;
+	}
+
+	float fx = u * (float)(width - 1);
+	float fy = v * (float)(height - 1);
+	int x0 = (int)fx;
+	int y0 = (int)fy;
+	int x1 = x0 + 1;
+	int y1 = y0 + 1;
+	if (x1 > width - 1) {
+		x1 = width - 1;
+	}
+	if (y1 > height - 1) {
+		y1 = height - 1;
+	}
+
+	float tx = fx - (float)x0;
+	float ty = fy - (float)y0;
+	unsigned int a = pixels[(size_t)y0 * (size_t)width + (size_t)x0];
+	unsigned int b = pixels[(size_t)y0 * (size_t)width + (size_t)x1];
+	unsigned int c = pixels[(size_t)y1 * (size_t)width + (size_t)x0];
+	unsigned int d = pixels[(size_t)y1 * (size_t)width + (size_t)x1];
+	float channels[4];
+	int ch;
+	for (ch = 0; ch < 4; ch++) {
+		int shift = ch * 8;
+		float p00 = (float)((a >> shift) & 255);
+		float p10 = (float)((b >> shift) & 255);
+		float p01 = (float)((c >> shift) & 255);
+		float p11 = (float)((d >> shift) & 255);
+		channels[ch] = p00 * (1.0f - tx) * (1.0f - ty) + p10 * tx * (1.0f - ty) + p01 * (1.0f - tx) * ty + p11 * tx * ty;
+	}
+
+	unsigned int pixel = ((unsigned int)(channels[3] + 0.5f) << 24) | ((unsigned int)(channels[2] + 0.5f) << 16) | ((unsigned int)(channels[1] + 0.5f) << 8) | (unsigned int)(channels[0] + 0.5f);
+	return(pixel);
+}
+
+
+static void Apply_Tile_Detail(RemasterTileFile const & file, float u, float v, RemasterCorner & corner, int & r, int & g, int & b, float & brightness)
+{
+	if (file.HasHeight && file.HeightW > 0 && file.HeightH > 0) {
+		unsigned int pixel = Sample_Map(file.Height, file.HeightW, file.HeightH, u, v);
+		float height = (float)(((pixel >> 16) & 255) + ((pixel >> 8) & 255) + (pixel & 255)) / (255.0f * 3.0f);
+		brightness *= 0.60f + 0.40f * height;
+	}
+
+	if (file.HasNormal && file.NormalW > 0 && file.NormalH > 0) {
+		unsigned int pixel = Sample_Map(file.Normal, file.NormalW, file.NormalH, u, v);
+		float mx = (float)((pixel >> 16) & 255) / 127.5f - 1.0f;
+		float my = (float)((pixel >> 8) & 255) / 127.5f - 1.0f;
+		float mz = (float)(pixel & 255) / 127.5f - 1.0f;
+		if (mz < 0.15f) {
+			float remain = 1.0f - mx * mx - my * my;
+			mz = remain > 0.0f ? std::sqrt(remain) : 0.15f;
+		}
+		float nx = corner.NX;
+		float ny = corner.NY;
+		float nz = corner.NZ;
+		float tx = 1.0f;
+		float ty = 0.0f;
+		float tz = 0.0f;
+		float dt = tx * nx + ty * ny + tz * nz;
+		tx -= nx * dt;
+		ty -= ny * dt;
+		tz -= nz * dt;
+		Normalize_Normal(tx, ty, tz, false);
+		float bx = ny * tz - nz * ty;
+		float by = nz * tx - nx * tz;
+		float bz = nx * ty - ny * tx;
+		Normalize_Normal(bx, by, bz, false);
+		corner.NX = tx * mx + bx * my + nx * mz;
+		corner.NY = ty * mx + by * my + ny * mz;
+		corner.NZ = tz * mx + bz * my + nz * mz;
+		Normalize_Normal(corner.NX, corner.NY, corner.NZ, false);
+	}
+
+	if (file.HasSpecular && file.SpecularW > 0 && file.SpecularH > 0) {
+		unsigned int pixel = Sample_Map(file.Specular, file.SpecularW, file.SpecularH, u, v);
+		float spec = (float)(((pixel >> 16) & 255) + ((pixel >> 8) & 255) + (pixel & 255)) / (255.0f * 3.0f);
+		float ndotl = corner.NX * SUN_X + corner.NY * SUN_Y + corner.NZ * SUN_Z;
+		if (ndotl < 0.0f) {
+			ndotl = 0.0f;
+		}
+		float shine = spec * ndotl * ndotl * ndotl * 72.0f;
+		r = std::min(r + (int)(shine + 0.5f), 255);
+		g = std::min(g + (int)(shine * 0.92f + 0.5f), 255);
+		b = std::min(b + (int)(shine * 0.78f + 0.5f), 255);
+	}
+}
+
+
 static void Emit_Replacement(CellClass const & cell, RemasterTileFile const & mesh, int slot, int r, int g, int b, float brightness, unsigned short * chroma, int stride, Rect const & cliprect, bool apply_sun, bool lighting_only)
 {
 	Cell const id = cell.Fetch_CellID();
@@ -1913,6 +2433,9 @@ static void Emit_Replacement(CellClass const & cell, RemasterTileFile const & me
 		z0 = (float)(cell.Height * LEVEL_LEPTON_H) - zref * (float)LEVEL_LEPTON_H;
 	}
 
+	bool packed = mesh.IsSet && mesh.HasDiffuse && mesh.AtlasX >= 0 && mesh.DiffuseW > 0 && mesh.DiffuseH > 0;
+	_EmitLayer = 0;
+
 	std::size_t count = mesh.PX.size();
 	for (std::size_t i = 0; i + 2 < mesh.Idx.size(); i += 3) {
 		unsigned int ia = mesh.Idx[i];
@@ -1925,6 +2448,10 @@ static void Emit_Replacement(CellClass const & cell, RemasterTileFile const & me
 		RemasterCorner corners[3];
 		float us[3];
 		float vs[3];
+		int cr[3];
+		int cg[3];
+		int cb[3];
+		float bright[3];
 		unsigned int ids[3] = { ia, ib, ic };
 		for (int k = 0; k < 3; k++) {
 			unsigned int vi = ids[k];
@@ -1935,9 +2462,40 @@ static void Emit_Replacement(CellClass const & cell, RemasterTileFile const & me
 			corners[k].NX = mesh.NX[vi];
 			corners[k].NY = mesh.NY[vi];
 			corners[k].NZ = mesh.NZ[vi];
-			Face_UV(slot, apply_sun, corners[k], mesh.U[vi], mesh.V[vi], us[k], vs[k]);
+			if (packed) {
+				us[k] = ((float)mesh.AtlasX + 0.5f + mesh.U[vi] * ((float)mesh.DiffuseW - 1.0f)) / (float)_AtlasWidth;
+				vs[k] = ((float)mesh.AtlasY + 0.5f + mesh.V[vi] * ((float)mesh.DiffuseH - 1.0f)) / (float)_AtlasHeight;
+			} else {
+				Face_UV(slot, apply_sun, corners[k], mesh.U[vi], mesh.V[vi], us[k], vs[k]);
+			}
+			cr[k] = r;
+			cg[k] = g;
+			cb[k] = b;
+			bright[k] = brightness;
+			if (chroma == NULL) {
+				Apply_Tile_Detail(mesh, mesh.U[vi], mesh.V[vi], corners[k], cr[k], cg[k], cb[k], bright[k]);
+			}
 		}
-		Emit_Triangle(corners[0], corners[1], corners[2], r, g, b, brightness, chroma, stride, cliprect, us[0], vs[0], us[1], vs[1], us[2], vs[2], apply_sun, lighting_only);
+		if (chroma != NULL) {
+			Emit_Triangle(corners[0], corners[1], corners[2], cr[0], cg[0], cb[0], bright[0], chroma, stride, cliprect, us[0], vs[0], us[1], vs[1], us[2], vs[2], apply_sun, lighting_only);
+			continue;
+		}
+
+		int k;
+		for (k = 0; k < 3; k++) {
+			unsigned int color = Lit_Color(cr[k], cg[k], cb[k], bright[k], corners[k], apply_sun, lighting_only);
+			_BaseVerts.push_back(Make_Terrain_Vertex(corners[k], color, us[k], vs[k]));
+			_VertLayer.push_back((unsigned char)_EmitLayer);
+			LampSample sample;
+			sample.X = corners[k].X;
+			sample.Y = corners[k].Y;
+			sample.Z = corners[k].Z;
+			sample.NX = corners[k].NX;
+			sample.NY = corners[k].NY;
+			sample.NZ = corners[k].NZ;
+			sample.Base = color;
+			_LampSamples.push_back(sample);
+		}
 	}
 }
 
@@ -1956,16 +2514,20 @@ static void Emit_Cell_Geometry(CellClass const & cell, unsigned short * chroma, 
 
 	int slot = -1;
 	bool textured = _RemasteredTextures && _AtlasWidth > 0 && _AtlasHeight > 0;
-	if (textured && chroma == NULL) {
+	RemasterTileFile const * replace = Fetch_Tile_File(cell);
+	bool tileset_mesh = replace != NULL && replace->IsSet && replace->HasMesh && replace->AtlasX >= 0;
+	if (textured && chroma == NULL && !tileset_mesh) {
 		slot = Bake_Tile_Slot(cell);
 	}
 
 	bool apply_sun = textured;
 	bool lighting_only = textured && slot >= 0;
-	RemasterTileFile const * replace = Fetch_Tile_File(cell);
-	if (replace != NULL && replace->HasMesh) {
+	if (replace != NULL && replace->HasMesh && (!replace->IsSet || replace->AtlasX >= 0)) {
 		if (replace->IsSet && !Is_Tileset_Emit_Cell(cell)) {
 			return;
+		}
+		if (tileset_mesh) {
+			lighting_only = textured;
 		}
 		Emit_Replacement(cell, *replace, slot, r, g, b, brightness, chroma, stride, cliprect, apply_sun, lighting_only);
 		return;
@@ -2040,11 +2602,19 @@ static void Emit_Cell_Geometry(CellClass const & cell, unsigned short * chroma, 
 		}
 	}
 
+	RemasterCorner const & nw = grid[0][0];
 	RemasterCorner const & ne = grid[0][divs];
 	RemasterCorner const & se = grid[divs][divs];
 	RemasterCorner const & sw = grid[divs][0];
-	Emit_Drop_Face(ne, se, Cell(id.X + 1, id.Y), 0, 0, 0, CELL_LEPTON_H - 1, r, g, b, brightness, chroma, stride, cliprect);
-	Emit_Drop_Face(sw, se, Cell(id.X, id.Y + 1), 0, 0, CELL_LEPTON_W - 1, 0, r, g, b, brightness, chroma, stride, cliprect);
+	int extra_slot = slot;
+	CellClass const * extra_cell = &cell;
+	if (chroma == NULL && textured) {
+		extra_slot = Extra_Slot_Around(cell, slot, extra_cell);
+	}
+	Emit_Drop_Face(ne, se, Cell(id.X + 1, id.Y), 0, 0, 0, CELL_LEPTON_H - 1, r, g, b, brightness, chroma, stride, cliprect, extra_slot, extra_cell);
+	Emit_Drop_Face(sw, se, Cell(id.X, id.Y + 1), 0, 0, CELL_LEPTON_W - 1, 0, r, g, b, brightness, chroma, stride, cliprect, extra_slot, extra_cell);
+	Emit_Drop_Face(nw, sw, Cell(id.X - 1, id.Y), CELL_LEPTON_W - 1, 0, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, r, g, b, brightness, chroma, stride, cliprect, extra_slot, extra_cell);
+	Emit_Drop_Face(nw, ne, Cell(id.X, id.Y - 1), 0, CELL_LEPTON_H - 1, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, r, g, b, brightness, chroma, stride, cliprect, extra_slot, extra_cell);
 	RemasterCorner shade = grid[divs / 2][divs / 2];
 	Emit_Extra_Overlay(cell, slot, shade, r, g, b, brightness, chroma, stride, cliprect);
 }
@@ -2405,6 +2975,7 @@ void Remaster_Prepare_Frame(void)
 		_BaseVerts.clear();
 		_LampSamples.clear();
 		_TerrainVerts.clear();
+		Reset_Terrain_Layers();
 		return;
 	}
 
@@ -2423,6 +2994,7 @@ void Remaster_Prepare_Frame(void)
 			_BaseVerts.clear();
 			_LampSamples.clear();
 			_TerrainVerts.clear();
+			Reset_Terrain_Layers();
 			Emit_Visible_Terrain();
 			if (_AtlasOverflow) {
 				Clear_Atlas();
@@ -2430,6 +3002,7 @@ void Remaster_Prepare_Frame(void)
 				_BaseVerts.clear();
 				_LampSamples.clear();
 				_TerrainVerts.clear();
+				Reset_Terrain_Layers();
 				_AtlasOverflow = false;
 				Emit_Visible_Terrain();
 			}
@@ -2444,41 +3017,83 @@ void Remaster_Prepare_Frame(void)
 }
 
 
-void Remaster_Fetch_Terrain(RemasterTerrainVertex const *& verts, int & count, Rect & cliprect, unsigned int const *& atlas, int & atlaswidth, int & atlasheight, bool & textured, unsigned int & atlasserial)
+void Remaster_Fetch_Terrain(RemasterTerrainLayer * layers, int & layercount, Rect & cliprect, bool & textured)
 {
 	Remaster_Prepare_Frame();
+	layercount = 0;
+	cliprect = Rect();
+	textured = false;
+	if (layers == NULL) {
+		return;
+	}
+
 	std::vector<RemasterTerrainVertex> const * drawn = &_BaseVerts;
 	if (_MouseLight && !_TerrainVerts.empty()) {
 		drawn = &_TerrainVerts;
 	}
 	if (drawn->empty()) {
-		verts = NULL;
-		count = 0;
-		cliprect = Rect();
-		atlas = NULL;
-		atlaswidth = 0;
-		atlasheight = 0;
-		textured = false;
-		atlasserial = 0;
 		return;
 	}
 
-	verts = drawn->data();
-	count = (int)drawn->size();
 	cliprect = _TerrainClip;
-	if (_RemasteredTextures && !_AtlasPixels.empty()) {
+	textured = _RemasteredTextures && !_AtlasPixels.empty();
+	if (textured) {
 		Seal_White_Texel();
-		atlas = _AtlasPixels.data();
-		atlaswidth = _AtlasWidth;
-		atlasheight = _AtlasHeight;
-		textured = true;
-		atlasserial = _AtlasSerial;
-	} else {
-		atlas = NULL;
-		atlaswidth = 0;
-		atlasheight = 0;
-		textured = false;
-		atlasserial = 0;
+	}
+
+	int i;
+	for (i = 0; i < REMASTER_LAYER_MAX; i++) {
+		_LayerOut[i].clear();
+	}
+	for (i = 0; i < (int)drawn->size(); i++) {
+		int layer = 0;
+		if (i < (int)_VertLayer.size()) {
+			layer = _VertLayer[i];
+			if (layer < 0 || layer >= _LayerUsed) {
+				layer = 0;
+			}
+		}
+		_LayerOut[layer].push_back((*drawn)[i]);
+	}
+
+	for (i = 0; i < _LayerUsed && layercount < REMASTER_LAYER_MAX; i++) {
+		if (_LayerOut[i].empty()) {
+			continue;
+		}
+
+		RemasterTerrainLayer & dest = layers[layercount];
+		dest.Verts = _LayerOut[i].data();
+		dest.Count = (int)_LayerOut[i].size();
+		dest.Linear = false;
+		if (i == 0) {
+			if (textured) {
+				dest.Pixels = _AtlasPixels.data();
+				dest.Width = _AtlasWidth;
+				dest.Height = _AtlasHeight;
+				dest.Serial = _AtlasSerial;
+			} else {
+				dest.Pixels = NULL;
+				dest.Width = 0;
+				dest.Height = 0;
+				dest.Serial = 0;
+			}
+		} else {
+			RemasterTileFile const * file = _LayerSource[i];
+			if (file != NULL && file->HasDiffuse) {
+				dest.Pixels = file->Diffuse.data();
+				dest.Width = file->DiffuseW;
+				dest.Height = file->DiffuseH;
+				dest.Serial = file->ImageSerial;
+				dest.Linear = file->DiffuseW > TILE_SLOT || file->DiffuseH > TILE_SLOT;
+				textured = true;
+			} else {
+				dest.Pixels = NULL;
+				dest.Width = 0;
+				dest.Height = 0;
+				dest.Serial = 0;
+			}
+		}
+		layercount += 1;
 	}
 }
 
@@ -2541,6 +3156,19 @@ struct RemasterExtraBlit
 	int CropY;
 	int CropW;
 	int CropH;
+	int BlitDX;
+	int BlitDY;
+};
+
+
+struct ExportExtraMap
+{
+	RemasterExtraBlit const * extra;
+	int OwnerX;
+	int OwnerY;
+	int OwnerHeight;
+	float AtlasW;
+	float AtlasH;
 };
 
 
@@ -2567,43 +3195,104 @@ static void Fill_Unprojected_Record(IsoTileRecord const * record, unsigned short
 			dest[(desty + y) * destw + destx + x] = pixel;
 		}
 	}
+	Spread_Rgba_Rect(dest, destw, destx, desty, TILE_SLOT, TILE_SLOT);
 }
 
 
-static void Export_Wall_UV(RemasterExtraBlit const * extra, int gx, int gy, float atlas_w, float atlas_h, float edge_t, float drop_t, float & u, float & v)
+static void Export_Iso_Pixel(float wx, float wy, float wz, float & sx, float & sy)
 {
-	if (extra != NULL && extra->CropW > 0 && extra->CropH > 0) {
-		u = ((float)(extra->DestX + extra->CropX) + 0.5f + edge_t * ((float)extra->CropW - 1.0f)) / atlas_w;
-		v = ((float)(extra->DestY + extra->CropY) + 0.5f + drop_t * ((float)extra->CropH - 1.0f)) / atlas_h;
+	float iso_x = wx * (float)ISO_TILE_PIXEL_W * 0.5f + wy * (float)ISO_TILE_PIXEL_W * -0.5f;
+	float iso_y = wx * (float)ISO_TILE_PIXEL_H * 0.5f + wy * (float)ISO_TILE_PIXEL_H * 0.5f;
+	static float const z_pixels_per_lepton = (float)(std::sin(RAD_60) * (ISO_TILE_PIXEL_W / CELL_LEPTON_DIAG));
+	sx = iso_x / (float)CELL_LEPTON;
+	sy = iso_y / (float)CELL_LEPTON - wz * z_pixels_per_lepton;
+}
+
+
+static void Export_Wall_Vertex_UV(ExportExtraMap const & map, Cell const & id, int gx, int gy, float x, float y, float z, float z_base, float edge_t, float drop_t, float & u, float & v)
+{
+	if (map.extra == NULL || map.extra->CropW < 1 || map.extra->CropH < 1) {
+		u = ((float)gx + 0.5f) * (float)TILE_SLOT / map.AtlasW;
+		v = ((float)gy + 0.5f) * (float)TILE_SLOT / map.AtlasH;
 		return;
 	}
 
-	u = ((float)gx + 0.5f) * (float)TILE_SLOT / atlas_w;
-	v = ((float)gy + 0.5f) * (float)TILE_SLOT / atlas_h;
+	float wx = ((float)id.X + (x - (float)gx)) * (float)CELL_LEPTON_W;
+	float wy = ((float)id.Y + (y - (float)gy)) * (float)CELL_LEPTON_H;
+	float wz = z * (float)LEVEL_LEPTON_H + z_base;
+	float sx;
+	float sy;
+	Export_Iso_Pixel(wx, wy, wz, sx, sy);
+	float ox;
+	float oy;
+	Export_Iso_Pixel((float)(map.OwnerX * CELL_LEPTON_W), (float)(map.OwnerY * CELL_LEPTON_H), 0.0f, ox, oy);
+	float ex = ox - (float)(ISO_TILE_PIXEL_W / 2) + (float)map.extra->BlitDX + (float)map.extra->CropX;
+	float ey = oy - (float)(LEVEL_PIXEL_H_1 * map.OwnerHeight) + (float)map.extra->BlitDY + (float)map.extra->CropY;
+	float tu = (sx - ex) / (float)map.extra->CropW;
+	float tv = (sy - ey) / (float)map.extra->CropH;
+	if (tu < 0.0f || tu > 1.0f || tv < 0.0f || tv > 1.0f) {
+		tu = edge_t;
+		tv = drop_t;
+	}
+	u = ((float)(map.extra->DestX + map.extra->CropX) + 0.5f + tu * ((float)map.extra->CropW - 1.0f)) / map.AtlasW;
+	v = ((float)(map.extra->DestY + map.extra->CropY) + 0.5f + tv * ((float)map.extra->CropH - 1.0f)) / map.AtlasH;
 }
 
 
-static void Export_Wall_Face_UVs(RemasterExtraBlit const * extra, int gx, int gy, float atlas_w, float atlas_h, float & u0, float & v0, float & u1, float & v1, float & u2, float & v2, float & u3, float & v3)
+// A drop wall is often not planar; the back face keeps a textured triangle in viewers that cull.
+static void Push_Export_Tri(RemasterTileFile & mesh, float x0, float y0, float z0, float x1, float y1, float z1, float x2, float y2, float z2, float nx, float ny, float nz, float u0, float v0, float u1, float v1, float u2, float v2)
 {
-	Export_Wall_UV(extra, gx, gy, atlas_w, atlas_h, 0.0f, 0.0f, u0, v0);
-	Export_Wall_UV(extra, gx, gy, atlas_w, atlas_h, 1.0f, 0.0f, u1, v1);
-	Export_Wall_UV(extra, gx, gy, atlas_w, atlas_h, 1.0f, 1.0f, u2, v2);
-	Export_Wall_UV(extra, gx, gy, atlas_w, atlas_h, 0.0f, 1.0f, u3, v3);
+	Push_Local_Vertex(mesh, x0, y0, z0, nx, ny, nz, u0, v0);
+	Push_Local_Vertex(mesh, x1, y1, z1, nx, ny, nz, u1, v1);
+	Push_Local_Vertex(mesh, x2, y2, z2, nx, ny, nz, u2, v2);
+	Push_Local_Vertex(mesh, x0, y0, z0, -nx, -ny, -nz, u0, v0);
+	Push_Local_Vertex(mesh, x2, y2, z2, -nx, -ny, -nz, u2, v2);
+	Push_Local_Vertex(mesh, x1, y1, z1, -nx, -ny, -nz, u1, v1);
 }
 
 
-static void Push_Export_Wall(RemasterTileFile & mesh, float x0, float y0, float zh0, float x1, float y1, float zh1, float zl0, float zl1, float nx, float ny, float nz, float u0, float v0, float u1, float v1, float u2, float v2, float u3, float v3)
+static void Push_Export_Wall(RemasterTileFile & mesh, ExportExtraMap const & map, Cell const & id, int gx, int gy, float z_base, float x0, float y0, float zh0, float x1, float y1, float zh1, float zl0, float zl1, float nx, float ny, float nz)
 {
-	if (std::min(zh0 - zl0, zh1 - zl1) < 0.5f) {
+	if (zl0 > zh0) {
+		zl0 = zh0;
+	}
+	if (zl1 > zh1) {
+		zl1 = zh1;
+	}
+	if (std::max(zh0 - zl0, zh1 - zl1) < 0.5f) {
 		return;
 	}
 
-	Push_Local_Vertex(mesh, x0, y0, zh0, nx, ny, nz, u0, v0);
-	Push_Local_Vertex(mesh, x1, y1, zh1, nx, ny, nz, u1, v1);
-	Push_Local_Vertex(mesh, x1, y1, zl1, nx, ny, nz, u2, v2);
-	Push_Local_Vertex(mesh, x0, y0, zh0, nx, ny, nz, u0, v0);
-	Push_Local_Vertex(mesh, x1, y1, zl1, nx, ny, nz, u2, v2);
-	Push_Local_Vertex(mesh, x0, y0, zl0, nx, ny, nz, u3, v3);
+	for (int band = 0; band < WALL_DIVS; band++) {
+		float t0 = (float)band / (float)WALL_DIVS;
+		float t1 = (float)(band + 1) / (float)WALL_DIVS;
+		float za0 = zh0 + (zl0 - zh0) * t0;
+		float zb0 = zh1 + (zl1 - zh1) * t0;
+		float za1 = zh0 + (zl0 - zh0) * t1;
+		float zb1 = zh1 + (zl1 - zh1) * t1;
+		if (std::max(za0 - za1, zb0 - zb1) < 0.001f) {
+			continue;
+		}
+
+		float ua0;
+		float va0;
+		float ub0;
+		float vb0;
+		float ua1;
+		float va1;
+		float ub1;
+		float vb1;
+		Export_Wall_Vertex_UV(map, id, gx, gy, x0, y0, za0, z_base, 0.0f, t0, ua0, va0);
+		Export_Wall_Vertex_UV(map, id, gx, gy, x1, y1, zb0, z_base, 1.0f, t0, ub0, vb0);
+		Export_Wall_Vertex_UV(map, id, gx, gy, x0, y0, za1, z_base, 0.0f, t1, ua1, va1);
+		Export_Wall_Vertex_UV(map, id, gx, gy, x1, y1, zb1, z_base, 1.0f, t1, ub1, vb1);
+		if (zb0 - zb1 >= 0.001f) {
+			Push_Export_Tri(mesh, x0, y0, za0, x1, y1, zb0, x1, y1, zb1, nx, ny, nz, ua0, va0, ub0, vb0, ub1, vb1);
+		}
+		if (za0 - za1 >= 0.001f) {
+			Push_Export_Tri(mesh, x0, y0, za0, x1, y1, zb1, x0, y0, za1, nx, ny, nz, ua0, va0, ub1, vb1, ua1, va1);
+		}
+	}
 }
 
 
@@ -2638,6 +3327,44 @@ static float Export_Edge_Z(Cell const & nid, int localx, int localy, float z_bas
 }
 
 
+static RemasterExtraBlit const * Find_Packed_Extra(std::vector<RemasterExtraBlit> const & extras, int index)
+{
+	for (RemasterExtraBlit const & blit : extras) {
+		if (blit.Index == index && blit.CropW > 0 && blit.CropH > 0) {
+			return(&blit);
+		}
+	}
+
+	return(NULL);
+}
+
+
+static RemasterExtraBlit const * Extra_For_Subtile(std::vector<RemasterExtraBlit> const & extras, int mw, int mh, int gx, int gy)
+{
+	RemasterExtraBlit const * extra = Find_Packed_Extra(extras, gx + mw * gy);
+	if (extra != NULL) {
+		return(extra);
+	}
+
+	int const dx[4] = { 1, -1, 0, 0 };
+	int const dy[4] = { 0, 0, 1, -1 };
+	for (int i = 0; i < 4; i++) {
+		int nx = gx + dx[i];
+		int ny = gy + dy[i];
+		if (nx < 0 || ny < 0 || nx >= mw || ny >= mh) {
+			continue;
+		}
+
+		extra = Find_Packed_Extra(extras, nx + mw * ny);
+		if (extra != NULL) {
+			return(extra);
+		}
+	}
+
+	return(NULL);
+}
+
+
 // Extra artwork textures walls that drop to a neighbor. Outer walls use that neighbor's height, not a shared floor under the whole set.
 static void Collect_Remaster_Subtile(CellClass const & cell, int gx, int gy, int mw, int mh, std::vector<char> const & included, float z_base, float z_floor, float atlas_w, float atlas_h, RemasterExtraBlit const * extra, RemasterTileFile & mesh)
 {
@@ -2664,12 +3391,16 @@ static void Collect_Remaster_Subtile(CellClass const & cell, int gx, int gy, int
 			RemasterCorner const & c10 = grid[j][i + 1];
 			RemasterCorner const & c11 = grid[j + 1][i + 1];
 			RemasterCorner const & c01 = grid[j + 1][i];
-			float u00 = ((float)gx + (float)i / (float)divs) * (float)TILE_SLOT / atlas_w;
-			float v00 = ((float)gy + (float)j / (float)divs) * (float)TILE_SLOT / atlas_h;
-			float u10 = ((float)gx + (float)(i + 1) / (float)divs) * (float)TILE_SLOT / atlas_w;
+			float su0 = (float)i / (float)divs;
+			float sv0 = (float)j / (float)divs;
+			float su1 = (float)(i + 1) / (float)divs;
+			float sv1 = (float)(j + 1) / (float)divs;
+			float u00 = ((float)(gx * TILE_SLOT) + 1.5f + su0 * ((float)TILE_SLOT - 3.0f)) / atlas_w;
+			float v00 = ((float)(gy * TILE_SLOT) + 1.5f + sv0 * ((float)TILE_SLOT - 3.0f)) / atlas_h;
+			float u10 = ((float)(gx * TILE_SLOT) + 1.5f + su1 * ((float)TILE_SLOT - 3.0f)) / atlas_w;
 			float v10 = v00;
 			float u11 = u10;
-			float v11 = ((float)gy + (float)(j + 1) / (float)divs) * (float)TILE_SLOT / atlas_h;
+			float v11 = ((float)(gy * TILE_SLOT) + 1.5f + sv1 * ((float)TILE_SLOT - 3.0f)) / atlas_h;
 			float u01 = u00;
 			float v01 = v11;
 			Push_Local_Vertex(mesh, c00.X, c00.Y, c00.Z, c00.NX, c00.NY, c00.NZ, u00, v00);
@@ -2681,14 +3412,6 @@ static void Collect_Remaster_Subtile(CellClass const & cell, int gx, int gy, int
 		}
 	}
 
-	float u0;
-	float v0;
-	float u1;
-	float v1;
-	float u2;
-	float v2;
-	float u3;
-	float v3;
 	Cell const east_id(id.X + 1, id.Y);
 	Cell const west_id(id.X - 1, id.Y);
 	Cell const south_id(id.X, id.Y + 1);
@@ -2697,11 +3420,27 @@ static void Collect_Remaster_Subtile(CellClass const & cell, int gx, int gy, int
 	float zhe_s = grid[divs][divs].Z;
 	float zhw_n = grid[0][0].Z;
 	float zhw_s = grid[divs][0].Z;
-	Export_Wall_Face_UVs(extra, gx, gy, atlas_w, atlas_h, u0, v0, u1, v1, u2, v2, u3, v3);
-	Push_Export_Wall(mesh, grid[0][divs].X, grid[0][divs].Y, zhe_n, grid[divs][divs].X, grid[divs][divs].Y, zhe_s, Export_Edge_Z(east_id, 0, 0, z_base, zhe_n), Export_Edge_Z(east_id, 0, CELL_LEPTON_H - 1, z_base, zhe_s), 1.0f, 0.0f, 0.0f, u0, v0, u1, v1, u2, v2, u3, v3);
-	Push_Export_Wall(mesh, grid[0][0].X, grid[0][0].Y, zhw_n, grid[divs][0].X, grid[divs][0].Y, zhw_s, Export_Edge_Z(west_id, CELL_LEPTON_W - 1, 0, z_base, zhw_n), Export_Edge_Z(west_id, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, z_base, zhw_s), -1.0f, 0.0f, 0.0f, u0, v0, u1, v1, u2, v2, u3, v3);
-	Push_Export_Wall(mesh, grid[divs][0].X, grid[divs][0].Y, zhw_s, grid[divs][divs].X, grid[divs][divs].Y, zhe_s, Export_Edge_Z(south_id, 0, 0, z_base, zhw_s), Export_Edge_Z(south_id, CELL_LEPTON_W - 1, 0, z_base, zhe_s), 0.0f, 1.0f, 0.0f, u0, v0, u1, v1, u2, v2, u3, v3);
-	Push_Export_Wall(mesh, grid[0][divs].X, grid[0][divs].Y, zhe_n, grid[0][0].X, grid[0][0].Y, zhw_n, Export_Edge_Z(north_id, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, z_base, zhe_n), Export_Edge_Z(north_id, 0, CELL_LEPTON_H - 1, z_base, zhw_n), 0.0f, -1.0f, 0.0f, u0, v0, u1, v1, u2, v2, u3, v3);
+	ExportExtraMap extra_map;
+	extra_map.extra = extra;
+	extra_map.OwnerX = id.X;
+	extra_map.OwnerY = id.Y;
+	extra_map.OwnerHeight = cell.Height;
+	extra_map.AtlasW = atlas_w;
+	extra_map.AtlasH = atlas_h;
+	if (extra != NULL && mw > 0) {
+		int egx = extra->Index % mw;
+		int egy = extra->Index / mw;
+		Cell owner_id(id.X - gx + egx, id.Y - gy + egy);
+		extra_map.OwnerX = owner_id.X;
+		extra_map.OwnerY = owner_id.Y;
+		if (Map.In_Radar(owner_id)) {
+			extra_map.OwnerHeight = Map[owner_id].Height;
+		}
+	}
+	Push_Export_Wall(mesh, extra_map, id, gx, gy, z_base, grid[divs][divs].X, grid[divs][divs].Y, zhe_s, grid[0][divs].X, grid[0][divs].Y, zhe_n, Export_Edge_Z(east_id, 0, CELL_LEPTON_H - 1, z_base, zhe_s), Export_Edge_Z(east_id, 0, 0, z_base, zhe_n), 1.0f, 0.0f, 0.0f);
+	Push_Export_Wall(mesh, extra_map, id, gx, gy, z_base, grid[0][0].X, grid[0][0].Y, zhw_n, grid[divs][0].X, grid[divs][0].Y, zhw_s, Export_Edge_Z(west_id, CELL_LEPTON_W - 1, 0, z_base, zhw_n), Export_Edge_Z(west_id, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, z_base, zhw_s), -1.0f, 0.0f, 0.0f);
+	Push_Export_Wall(mesh, extra_map, id, gx, gy, z_base, grid[divs][0].X, grid[divs][0].Y, zhw_s, grid[divs][divs].X, grid[divs][divs].Y, zhe_s, Export_Edge_Z(south_id, 0, 0, z_base, zhw_s), Export_Edge_Z(south_id, CELL_LEPTON_W - 1, 0, z_base, zhe_s), 0.0f, 1.0f, 0.0f);
+	Push_Export_Wall(mesh, extra_map, id, gx, gy, z_base, grid[0][divs].X, grid[0][divs].Y, zhe_n, grid[0][0].X, grid[0][0].Y, zhw_n, Export_Edge_Z(north_id, CELL_LEPTON_W - 1, CELL_LEPTON_H - 1, z_base, zhe_n), Export_Edge_Z(north_id, 0, CELL_LEPTON_H - 1, z_base, zhw_n), 0.0f, -1.0f, 0.0f);
 	(void)included;
 	(void)z_floor;
 }
@@ -2764,6 +3503,8 @@ static bool Collect_File_Tileset(CellClass const & cursor, IsometricTileTypeClas
 			blit.CropY = 0;
 			blit.CropW = record->ExtraWidth;
 			blit.CropH = record->ExtraHeight;
+			blit.BlitDX = record->ExtraX - record->X;
+			blit.BlitDY = record->ExtraY - record->Y;
 			extras.push_back(blit);
 			extra_x += record->ExtraWidth;
 			if (record->ExtraHeight > extra_row_h) {
@@ -2826,6 +3567,7 @@ static bool Collect_File_Tileset(CellClass const & cursor, IsometricTileTypeClas
 			blit.CropY = y0;
 			blit.CropW = x1 - x0 + 1;
 			blit.CropH = y1 - y0 + 1;
+			Spread_Rgba_Rect(rgba.data(), atlas_w, blit.DestX, blit.DestY, blit.Width, blit.Height);
 		} else {
 			blit.CropW = 0;
 			blit.CropH = 0;
@@ -2924,18 +3666,11 @@ static bool Collect_File_Tileset(CellClass const & cursor, IsometricTileTypeClas
 
 	for (int gy = 0; gy < mh && gy < foot_h; gy++) {
 		for (int gx = 0; gx < mw && gx < foot_w; gx++) {
-			int index = gx + mw * gy;
 			if (!Export_In_Set(included, mw, mh, gx, gy)) {
 				continue;
 			}
 
-			RemasterExtraBlit const * extra = NULL;
-			for (RemasterExtraBlit const & blit : extras) {
-				if (blit.Index == index) {
-					extra = &blit;
-					break;
-				}
-			}
+			RemasterExtraBlit const * extra = Extra_For_Subtile(extras, mw, mh, gx, gy);
 			Collect_Remaster_Subtile(Map[Cell(origin.X + gx, origin.Y + gy)], gx, gy, mw, mh, included, z_base, z_floor, atlas_wf, atlas_hf, extra, mesh);
 		}
 	}
