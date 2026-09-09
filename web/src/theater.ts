@@ -13,11 +13,12 @@ export type TheaterSeed = {
 	iso_root: string;
 	suffix: string;
 	mm_suffix: string;
+	image_letter: string;
 };
 
 const SEEDS: TheaterSeed[] = [
-	{ name: "TEMPERATE", root: "TEMPERAT", iso_root: "ISOTEMP", suffix: "TEM", mm_suffix: "MMT" },
-	{ name: "SNOW", root: "SNOW", iso_root: "ISOSNOW", suffix: "SNO", mm_suffix: "MMS" },
+	{ name: "TEMPERATE", root: "TEMPERAT", iso_root: "ISOTEMP", suffix: "TEM", mm_suffix: "MMT", image_letter: "T" },
+	{ name: "SNOW", root: "SNOW", iso_root: "ISOSNOW", suffix: "SNO", mm_suffix: "MMS", image_letter: "A" },
 ];
 
 export function theater_from_name(name: string): TheaterSeed {
@@ -28,5 +29,6 @@ export function theater_from_name(name: string): TheaterSeed {
 		iso_root: upper,
 		suffix: upper.slice(0, 3),
 		mm_suffix: "",
+		image_letter: upper.charAt(0) || "T",
 	};
 }

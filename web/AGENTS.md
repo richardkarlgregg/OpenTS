@@ -28,9 +28,23 @@ game.
   cells as clear. The unused north pad (`LocalSize.Y`) is omitted so that
   strip is not drawn. The campaign
   loading picture comes from `Pick_Load_Background_Name`: CD 0 is GDI
-  (`LOAD400C`/`LOAD400D`), CD 1 is Nod (`LOAD400A`/`LOAD400B`). Clicking the
+  (`LOAD400C`/`LOAD400D`), CD 1 is Nod (`LOAD400A`/`LOAD400B`).   Clicking the
   load screen opens a pannable isometric tile view from theater TMP files
-  (`ISO<Suffix>.PAL` and `Draw_Tile`); Escape returns to the menu. Skirmish lists
+  (`ISO<Suffix>.PAL` and `Draw_Tile`), with overlay, terrain, building, and
+  infantry SHPs from `OverlayPack` / the scenario INI. Nested theater mixes
+  (`TEMPERAT.MIX` / `TEM.MIX`) and side mixes (`SIDEC01.MIX` and the matching
+  uncached/CD archives) are opened the same way `Init_Theater` and
+  `Prep_For_Side` mount them. Theater-palette art (`TerrainPalette=yes`,
+  trees, bridges) uses `ISO<Suffix>.PAL`; tiberium uses the unit palette with
+  the `[Colors]` scheme named by that tiberium's `Color=` (Riparius is green).
+  Walls use the unit palette and neighbour connection frames. Building
+  `ActiveAnim` overlays, `BibShape`, and `PowersUpBuilding` add-ons (matched
+  onto the parent foundation, not only the origin cell) are drawn at the ART
+  pixel offsets. Shape shadows are the second half of each SHP, blitted with
+  `SHAPE_DARKEN`. Map lighting comes from the scenario `[Lighting]` section
+  (ambient, RGB tint, height `Level`/`Ground`) plus `LightIntensity` sources
+  on buildings, including `InvisibleInGame` lamp posts. Those posts and wall
+  buildings that convert to overlay are not drawn. Escape returns to the menu. Skirmish lists
   `MISSIONS.PKT` and loose `.MPR` maps the same way. Simulation, movies,
   and save/load are not playable yet.
 

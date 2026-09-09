@@ -245,6 +245,18 @@ function parse_header_bytes(plain: Uint8Array): { count: number; data_size: numb
 
 const registered: MixFileClass[] = [];
 
+function side_archives(): string[] {
+	const names: string[] = [];
+	for (const side of ["01", "02"]) {
+		names.push(`SIDEC${side}.MIX`, `SIDENC${side}.MIX`, `SIDECD${side}.MIX`);
+		for (let addon = 1; addon <= 5; addon++) {
+			const pack = String(addon).padStart(2, "0");
+			names.push(`E${pack}SC${side}.MIX`, `E${pack}SNC${side}.MIX`, `E${pack}SCD${side}.MIX`);
+		}
+	}
+	return names;
+}
+
 const NESTED_MIX = [
 	"CACHE.MIX",
 	"CONQUER.MIX",
@@ -252,6 +264,11 @@ const NESTED_MIX = [
 	"GMENU.MIX",
 	"ISOTEMP.MIX",
 	"ISOSNOW.MIX",
+	"TEMPERAT.MIX",
+	"SNOW.MIX",
+	"TEM.MIX",
+	"SNO.MIX",
+	...side_archives(),
 ];
 
 export async function register_mix(directory: GameDirectory, filename: string): Promise<MixFileClass | null> {
@@ -264,12 +281,11 @@ export async function register_mix(directory: GameDirectory, filename: string): 
 
 export async function register_nested_mixes(): Promise<MixFileClass[]> {
 	const opened: MixFileClass[] = [];
-	const parents = registered.slice();
 	for (const name of NESTED_MIX) {
 		if (registered.some((mix) => basename(mix.filename) === name.toLowerCase())) {
 			continue;
 		}
-		for (const parent of parents) {
+		for (const parent of registered.slice()) {
 			const nested = await MixFileClass.open_nested(parent, name);
 			if (nested && nested.count > 0) {
 				registered.push(nested);

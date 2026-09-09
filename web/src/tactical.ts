@@ -21,7 +21,17 @@ import {
 	load_theater_tiles,
 	type TheaterTiles,
 } from "./isotile";
+import {
+	init_cell_light,
+	light_key,
+	NORMAL_LIGHT,
+	shade_palette,
+	type CellLight,
+	type ScenarioLighting,
+} from "./light";
+import type { MapArtwork, MapSprite } from "./objects";
 import { canvas_mouse, present } from "./present";
+import { blit_shape, blit_shape_shadow } from "./shp";
 import { DSurface } from "./surface";
 
 type IsoCell = { x: number; y: number; height: number; tile: number; subtile: number };
@@ -85,9 +95,88 @@ function starting_camera(cells: IsoCell[], play: Rect, local: Rect, home: Point2
 	return { x: pixel.x - (VIEW_W >> 1), y: pixel.y - (VIEW_H >> 1) };
 }
 
-function draw_view(tiles: TheaterTiles, cells: IsoCell[], camera: Point2D): DSurface {
-	const frame = new DSurface(VIEW_W, VIEW_H);
+const DAYLIGHT: ScenarioLighting = {
+	ambient: 100,
+	red: 100,
+	green: 100,
+	blue: 100,
+	ground: NORMAL_LIGHT / 10,
+	level: Math.floor(NORMAL_LIGHT / 60),
+};
+
+function sprite_brightness(sprite: MapSprite, light: CellLight): number {
+	if (sprite.bright === "day") {
+		return NORMAL_LIGHT + sprite.extra_light;
+	}
+	if (sprite.bright === "tile") {
+		return light.tile + sprite.extra_light;
+	}
+	return light.brightness + sprite.extra_light;
+}
+
+function lit_palette(
+	cache: Map<string, Uint16Array>,
+	base: Uint16Array,
+	tag: string,
+	brightness: number,
+	red: number,
+	green: number,
+	blue: number,
+): Uint16Array {
+	const key = `${tag}:${light_key(brightness, red, green, blue)}`;
+	const cached = cache.get(key);
+	if (cached) {
+		return cached;
+	}
+	const palette = shade_palette(base, brightness, red, green, blue);
+	cache.set(key, palette);
+	return palette;
+}
+
+function sprite_palette(
+	artwork: MapArtwork,
+	sprite: MapSprite,
+	light: CellLight,
+	cache: Map<string, Uint16Array>,
+): Uint16Array {
+	const brightness = sprite_brightness(sprite, light);
+	const tinted = sprite.palette === "theater";
+	const red = tinted ? light.red : NORMAL_LIGHT;
+	const green = tinted ? light.green : NORMAL_LIGHT;
+	const blue = tinted ? light.blue : NORMAL_LIGHT;
+	if (sprite.scheme) {
+		const named = artwork.schemes.get(sprite.scheme) ?? artwork.schemes.get(sprite.scheme.toUpperCase());
+		const base =
+			named ??
+			[...artwork.schemes.entries()].find(([name]) => name.includes("GREEN"))?.[1] ??
+			artwork.unit_palette;
+		return lit_palette(cache, base, "scheme", brightness, red, green, blue);
+	}
+	const base = sprite.palette === "unit" ? artwork.unit_palette : artwork.theater_palette;
+	return lit_palette(cache, base, sprite.palette, brightness, red, green, blue);
+}
+
+function gather_cell_lights(cells: IsoCell[], lighting: ScenarioLighting, artwork: MapArtwork | null): Map<string, CellLight> {
+	const lights = artwork?.lights ?? [];
+	const table = new Map<string, CellLight>();
 	for (const cell of cells) {
+		table.set(`${cell.x},${cell.y}`, init_cell_light(cell.x, cell.y, cell.height, lighting, lights));
+	}
+	return table;
+}
+
+function draw_view(
+	tiles: TheaterTiles,
+	cells: IsoCell[],
+	camera: Point2D,
+	artwork: MapArtwork | null,
+	cell_lights: Map<string, CellLight>,
+	palettes: Map<string, Uint16Array>,
+): DSurface {
+	const frame = new DSurface(VIEW_W, VIEW_H);
+	const heights = new Map<string, number>();
+	for (const cell of cells) {
+		heights.set(`${cell.x},${cell.y}`, cell.height);
 		const pixel = cell_pixel(cell);
 		const dx = pixel.x - camera.x;
 		const dy = pixel.y - camera.y;
@@ -96,8 +185,59 @@ function draw_view(tiles: TheaterTiles, cells: IsoCell[], camera: Point2D): DSur
 		}
 		const tile = fetch_subtile(tiles, cell.tile, cell.subtile);
 		if (tile) {
-			blit_iso_tile(frame, dx, dy, tile);
+			const light = cell_lights.get(`${cell.x},${cell.y}`) ?? {
+				brightness: NORMAL_LIGHT,
+				tile: NORMAL_LIGHT,
+				red: NORMAL_LIGHT,
+				green: NORMAL_LIGHT,
+				blue: NORMAL_LIGHT,
+			};
+			const palette = lit_palette(
+				palettes,
+				artwork?.theater_palette ?? tiles.palette,
+				"tile",
+				light.tile,
+				light.red,
+				light.green,
+				light.blue,
+			);
+			blit_iso_tile(frame, dx, dy, tile, palette);
 		}
+	}
+	if (!artwork) {
+		return frame;
+	}
+	const draw_sprite = (sprite: (typeof artwork.sprites)[number], shadow: boolean): void => {
+		const height = heights.get(`${sprite.x},${sprite.y}`) ?? 0;
+		const pixel = cell_pixel({ x: sprite.x, y: sprite.y, height, tile: 0, subtile: 0 });
+		const dx = pixel.x + (ISO_TILE_PIXEL_W >> 1) + sprite.ox - camera.x;
+		const dy = pixel.y + (ISO_TILE_PIXEL_H >> 1) + sprite.oy - camera.y;
+		if (dx < -128 || dy < -160 || dx >= VIEW_W + 128 || dy >= VIEW_H + 160) {
+			return;
+		}
+		const shape = artwork.shapes.get(sprite.file);
+		if (!shape) {
+			return;
+		}
+		if (shadow) {
+			blit_shape_shadow(frame, shape, sprite.frame, dx, dy, true);
+			return;
+		}
+		const light = cell_lights.get(`${sprite.x},${sprite.y}`) ?? {
+			brightness: NORMAL_LIGHT,
+			tile: NORMAL_LIGHT,
+			red: NORMAL_LIGHT,
+			green: NORMAL_LIGHT,
+			blue: NORMAL_LIGHT,
+		};
+		const palette = sprite_palette(artwork, sprite, light, palettes);
+		blit_shape(frame, palette, shape, sprite.frame, dx, dy, true);
+	};
+	for (const sprite of artwork.sprites) {
+		draw_sprite(sprite, true);
+	}
+	for (const sprite of artwork.sprites) {
+		draw_sprite(sprite, false);
 	}
 	return frame;
 }
@@ -114,6 +254,7 @@ export async function Show_Tactical(
 	name: string,
 	log: (line: string) => void,
 	cancelled: () => boolean,
+	artwork: MapArtwork | null = null,
 ): Promise<void> {
 	const tiles = await load_theater_tiles(directory, theater);
 	const draw_list = gather_cells(cells, play, fill_height);
@@ -121,6 +262,9 @@ export async function Show_Tactical(
 		log("No In_Radar cells to draw.");
 		return;
 	}
+	const lighting = artwork?.lighting ?? DAYLIGHT;
+	const palettes = new Map<string, Uint16Array>();
+	const cell_lights = gather_cell_lights(draw_list, lighting, artwork);
 	log(`Tactical map ${draw_list.length} cells, theater ${theater || "?"}. Drag or arrows to pan; Escape returns to the menu.`);
 
 	let camera = starting_camera(draw_list, play, local, home);
@@ -130,7 +274,7 @@ export async function Show_Tactical(
 	canvas.style.cursor = "grab";
 
 	const paint = (): void => {
-		present(canvas, draw_view(tiles, draw_list, camera), [
+		present(canvas, draw_view(tiles, draw_list, camera, artwork, cell_lights, palettes), [
 			{ x: 8, y: 8, width: 624, height: 18, text: name, selected: true },
 			{ x: 8, y: 374, width: 624, height: 18, text: "Drag or arrows to pan; Escape returns to the menu" },
 		]);

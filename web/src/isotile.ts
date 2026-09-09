@@ -26,12 +26,12 @@ export type IsoExtraImage = {
 	dy: number;
 	width: number;
 	height: number;
-	pixels: Uint16Array;
+	indices: Uint8Array;
 };
 
 export type IsoSubtile = {
 	colors: TilePreviewColors;
-	pixels: Uint16Array;
+	indices: Uint8Array;
 	extra: IsoExtraImage | null;
 };
 
@@ -63,11 +63,7 @@ function iso_row_span(row: number): { start: number; length: number } {
 	return { start: (ISO_TILE_PIXEL_W - length) >> 1, length };
 }
 
-function lookup_palette(palette: Uint16Array, index: number): number {
-	return palette[index & 0xff] ?? 0;
-}
-
-function parse_iso_tile_set(bytes: Uint8Array, palette: Uint16Array): IsoSubtile[] {
+function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	if (bytes.length < 20) {
 		return [];
 	}
@@ -82,7 +78,7 @@ function parse_iso_tile_set(bytes: Uint8Array, palette: Uint16Array): IsoSubtile
 	for (let i = 0; i < count; i++) {
 		const offset = view.getInt32(16 + i * 4, true);
 		if (offset <= 0 || offset + RECORD_HIGH + 2 >= bytes.length) {
-			tiles.push({ colors: { ...FALLBACK_COLORS }, pixels: new Uint16Array(ISO_PACKED), extra: null });
+			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null });
 			continue;
 		}
 		const colors: TilePreviewColors = {
@@ -90,11 +86,9 @@ function parse_iso_tile_set(bytes: Uint8Array, palette: Uint16Array): IsoSubtile
 			high: [bytes[offset + RECORD_HIGH]!, bytes[offset + RECORD_HIGH + 1]!, bytes[offset + RECORD_HIGH + 2]!],
 		};
 		const image_at = offset + RECORD_SIZE;
-		const pixels = new Uint16Array(ISO_PACKED);
+		const indices = new Uint8Array(ISO_PACKED);
 		if (image_at + ISO_PACKED <= bytes.length) {
-			for (let p = 0; p < ISO_PACKED; p++) {
-				pixels[p] = lookup_palette(palette, bytes[image_at + p]!);
-			}
+			indices.set(bytes.subarray(image_at, image_at + ISO_PACKED));
 		}
 		let extra: IsoExtraImage | null = null;
 		const flags = view.getUint32(offset + 36, true);
@@ -109,21 +103,16 @@ function parse_iso_tile_set(bytes: Uint8Array, palette: Uint16Array): IsoSubtile
 			const start = offset + extra_offset;
 			const need = extra_w * extra_h;
 			if (start >= 0 && start + need <= bytes.length) {
-				const extra_pixels = new Uint16Array(need);
-				for (let p = 0; p < need; p++) {
-					const index = bytes[start + p]!;
-					extra_pixels[p] = index === 0 ? 0 : lookup_palette(palette, index);
-				}
 				extra = {
 					dx: extra_x - rec_x,
 					dy: extra_y - rec_y,
 					width: extra_w,
 					height: extra_h,
-					pixels: extra_pixels,
+					indices: bytes.slice(start, start + need),
 				};
 			}
 		}
-		tiles.push({ colors, pixels, extra });
+		tiles.push({ colors, indices, extra });
 	}
 	return tiles;
 }
@@ -188,7 +177,7 @@ export async function load_theater_tiles(directory: GameDirectory, theater_name:
 			if (!packed && seed.mm_suffix.length > 0) {
 				packed = await cc_retrieve(directory, `${stem}.${seed.mm_suffix}`);
 			}
-			sets.push(packed ? parse_iso_tile_set(packed, palette) : []);
+			sets.push(packed ? parse_iso_tile_set(packed) : []);
 		}
 	}
 
@@ -236,7 +225,7 @@ export function fetch_subtile(tiles: TheaterTiles, tile: number, subtile: number
 	return set[subtile % set.length] ?? null;
 }
 
-export function blit_iso_tile(dest: DSurface, dx: number, dy: number, tile: IsoSubtile): void {
+export function blit_iso_tile(dest: DSurface, dx: number, dy: number, tile: IsoSubtile, palette: Uint16Array): void {
 	for (let row = 0; row < ISO_DRAW_HEIGHT; row++) {
 		const base = ISO_ROW_BASES[row]!;
 		const span = iso_row_span(row);
@@ -249,7 +238,7 @@ export function blit_iso_tile(dest: DSurface, dx: number, dy: number, tile: IsoS
 			if (x < 0 || x >= dest.width) {
 				continue;
 			}
-			dest.pixels[y * dest.width + x] = tile.pixels[base + i]!;
+			dest.pixels[y * dest.width + x] = palette[tile.indices[base + i]!]!;
 		}
 	}
 	if (!tile.extra) {
@@ -262,15 +251,15 @@ export function blit_iso_tile(dest: DSurface, dx: number, dy: number, tile: IsoS
 			continue;
 		}
 		for (let col = 0; col < extra.width; col++) {
-			const color = extra.pixels[row * extra.width + col]!;
-			if (color === 0) {
+			const index = extra.indices[row * extra.width + col]!;
+			if (index === 0) {
 				continue;
 			}
 			const x = dx + extra.dx + col;
 			if (x < 0 || x >= dest.width) {
 				continue;
 			}
-			dest.pixels[y * dest.width + x] = color;
+			dest.pixels[y * dest.width + x] = palette[index]!;
 		}
 	}
 }

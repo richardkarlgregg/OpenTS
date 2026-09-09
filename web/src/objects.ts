@@ -1,0 +1,870 @@
+/*******************************************************************************
+ *                                O P E N T S
+ *******************************************************************************
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * Copyright 2025 Electronic Arts Inc.
+ * Copyright 2026 OpenTS contributors
+ *
+ * Contains material derived from Electronic Arts source code.
+ * Modified by OpenTS contributors, 2026.
+ * EA's GPLv3 Section 7 additional terms and warranty disclaimers apply; see LICENSE.md.
+ ******************************************************************************/
+
+import { cc_retrieve } from "./ccfile";
+import type { GameDirectory } from "./files";
+import { INIClass } from "./ini";
+import { ISO_TILE_PIXEL_H, LEVEL_PIXEL_H } from "./isotile";
+import { lcw_straw_decompress } from "./lcw";
+import {
+	building_light_coord,
+	NORMAL_LIGHT,
+	read_scenario_lighting,
+	type MapLightSource,
+	type ScenarioLighting,
+} from "./light";
+import { read_palette, read_shp, type ShapeSet } from "./shp";
+import { build_hicolor_pixel } from "./surface";
+import { theater_from_name, type TheaterSeed } from "./theater";
+
+const MAP_CELL_W = 512;
+const MAP_CELL_H = 512;
+const OVERLAY_NONE = 0xff;
+const OVERLAYDATA_WALL_FRAME_MASK = 0x0f;
+const OVERLAYDATA_BRIDGE_NS_FULL1 = 9;
+const OVERLAYDATA_BRIDGE_NS_END2 = 17;
+
+export type MapSprite = {
+	x: number;
+	y: number;
+	ox: number;
+	oy: number;
+	frame: number;
+	names: string[];
+	file: string;
+	palette: "theater" | "unit";
+	scheme: string;
+	layer: number;
+	wall: string;
+	bright: "tile" | "object" | "day";
+	extra_light: number;
+};
+
+export type MapArtwork = {
+	sprites: MapSprite[];
+	shapes: Map<string, ShapeSet>;
+	theater_palette: Uint16Array;
+	unit_palette: Uint16Array;
+	schemes: Map<string, Uint16Array>;
+	lighting: ScenarioLighting;
+	lights: MapLightSource[];
+};
+
+type OverlayType = {
+	name: string;
+	graphic: string;
+	theater: boolean;
+	new_theater: boolean;
+	wall: boolean;
+	tiberium: boolean;
+	crate: boolean;
+	bridge: boolean;
+};
+
+type AnimOffset = {
+	stem: string;
+	x: number;
+	y: number;
+};
+
+type ShapeType = {
+	name: string;
+	graphic: string;
+	theater: boolean;
+	new_theater: boolean;
+	terrain_palette: boolean;
+	invisible: boolean;
+	wall: boolean;
+	voxel: boolean;
+	powers_up: string;
+	active: AnimOffset[];
+	powerup_loc: { x: number; y: number }[];
+	occupy: { x: number; y: number }[];
+	bib: string;
+	extra_light: number;
+	light_visibility: number;
+	light_intensity: number;
+	light_red: number;
+	light_green: number;
+	light_blue: number;
+};
+
+type TiberiumType = {
+	name: string;
+	color: string;
+	start: number;
+	variety: number;
+	ramp: number;
+};
+
+function is_bridge_name(name: string, graphic: string): boolean {
+	const text = `${name} ${graphic}`.toUpperCase();
+	return text.includes("BRIDGE") || text.includes("LOBRDG");
+}
+
+function hsv_to_rgb(hue: number, saturation: number, value: number): [number, number, number] {
+	let h = ((hue | 0) % 256 + 256) % 256;
+	let s = saturation | 0;
+	let v = value | 0;
+	if (s < 0) {
+		s = 0;
+	}
+	if (v < 0) {
+		v = 0;
+	}
+	if (s > 255) {
+		s = 255;
+	}
+	if (v > 255) {
+		v = 255;
+	}
+	h *= 6;
+	const f = h % 255;
+	const values = [0, v, v, 0, 0, 0, 0];
+	let tmp = ((s * f) / 255) | 0;
+	values[3] = ((v * (255 - tmp)) / 255) | 0;
+	values[4] = values[5] = ((v * (255 - s)) / 255) | 0;
+	tmp = 255 - (((s * (255 - f)) / 255) | 0);
+	values[6] = ((v * tmp) / 255) | 0;
+	let i = (h / 255) | 0;
+	i += i > 4 ? -4 : 2;
+	const red = values[i]! | 0;
+	i += i > 4 ? -4 : 2;
+	const blue = values[i]! | 0;
+	i += i > 4 ? -4 : 2;
+	const green = values[i]! | 0;
+	return [red & 255, green & 255, blue & 255];
+}
+
+function scheme_palette(base: Uint16Array, hue: number, saturation: number, value: number): Uint16Array {
+	const palette = base.slice();
+	const cos_step = ((14 / 3) * Math.PI) / 180;
+	const sin_step = ((8 / 3) * Math.PI) / 180;
+	for (let i = 0; i < 16; i++) {
+		let cosval = (20 * Math.PI) / 180 + i * cos_step;
+		const sinval = (50 * Math.PI) / 180 + i * sin_step;
+		if (i === 0) {
+			cosval = ((360 / 32) * Math.PI) / 180;
+		}
+		const [r, g, b] = hsv_to_rgb(hue, Math.sin(sinval) * saturation, Math.cos(cosval) * value);
+		palette[i + 16] = build_hicolor_pixel(r, g, b);
+	}
+	return palette;
+}
+
+function parse_hsv(ini: INIClass, section: string, entry: string): { h: number; s: number; v: number } | null {
+	const parts = ini.get_string(section, entry).split(",");
+	if (parts.length < 3) {
+		return null;
+	}
+	const h = Number.parseInt(parts[0]!.trim(), 10);
+	const s = Number.parseInt(parts[1]!.trim(), 10);
+	const v = Number.parseInt(parts[2]!.trim(), 10);
+	if (![h, s, v].every(Number.isFinite)) {
+		return null;
+	}
+	return { h, s, v };
+}
+
+function overlay_label(type: OverlayType): string {
+	return `${type.name} ${type.graphic}`;
+}
+
+function is_large_tiberium(type: OverlayType): boolean {
+	return /LTIB|TIBL|LARGE.?TIB/i.test(overlay_label(type));
+}
+
+function is_tiberium2(type: OverlayType): boolean {
+	return /TIBERIUM2|TIB2[_-]/i.test(overlay_label(type));
+}
+
+function is_tiberium3(type: OverlayType): boolean {
+	return /TIBERIUM3|TIB3[_-]/i.test(overlay_label(type));
+}
+
+function tiberium_overlay_start(image: number, overlays: OverlayType[]): number {
+	const match = (test: (type: OverlayType) => boolean): number => overlays.findIndex(test);
+	if (image === 2) {
+		const found = match(is_large_tiberium);
+		return found >= 0 ? found : 27;
+	}
+	if (image === 3) {
+		const found = match(is_tiberium2);
+		return found >= 0 ? found : 127;
+	}
+	if (image === 4) {
+		const found = match(is_tiberium3);
+		return found >= 0 ? found : 147;
+	}
+	const found = match((type) => type.tiberium && !is_large_tiberium(type) && !is_tiberium2(type) && !is_tiberium3(type));
+	return found >= 0 ? found : 102;
+}
+
+const FOUNDATIONS: { name: string; cells: { x: number; y: number }[] }[] = [
+	{ name: "1x1", cells: [{ x: 0, y: 0 }] },
+	{ name: "2x1", cells: [{ x: 0, y: 0 }, { x: 1, y: 0 }] },
+	{ name: "1x2", cells: [{ x: 0, y: 0 }, { x: 0, y: 1 }] },
+	{
+		name: "2x2",
+		cells: [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: 1, y: 1 },
+		],
+	},
+	{
+		name: "2x3",
+		cells: [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: 1, y: 1 },
+			{ x: 0, y: 2 },
+			{ x: 1, y: 2 },
+		],
+	},
+	{
+		name: "3x2",
+		cells: [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+			{ x: 2, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: 1, y: 1 },
+			{ x: 2, y: 1 },
+		],
+	},
+	{
+		name: "3x3",
+		cells: [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+			{ x: 2, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: 1, y: 1 },
+			{ x: 2, y: 1 },
+			{ x: 0, y: 2 },
+			{ x: 1, y: 2 },
+			{ x: 2, y: 2 },
+		],
+	},
+	{ name: "3x5", cells: occupy_rect(3, 5) },
+	{ name: "4x2", cells: occupy_rect(4, 2) },
+	{
+		name: "3x3Refinery",
+		cells: [
+			{ x: 0, y: 0 },
+			{ x: 1, y: 0 },
+			{ x: 2, y: 0 },
+			{ x: 0, y: 1 },
+			{ x: 1, y: 1 },
+			{ x: 0, y: 2 },
+			{ x: 1, y: 2 },
+			{ x: 2, y: 2 },
+		],
+	},
+	{ name: "1x3", cells: occupy_rect(1, 3) },
+	{ name: "3x1", cells: occupy_rect(3, 1) },
+	{ name: "4x3", cells: occupy_rect(4, 3) },
+	{ name: "1x4", cells: occupy_rect(1, 4) },
+	{ name: "1x5", cells: occupy_rect(1, 5) },
+	{ name: "2x6", cells: occupy_rect(2, 6) },
+	{ name: "2x5", cells: occupy_rect(2, 5) },
+	{ name: "5x3", cells: occupy_rect(5, 3) },
+	{ name: "4x4", cells: occupy_rect(4, 4) },
+	{ name: "3x4", cells: occupy_rect(3, 4) },
+	{ name: "6x4", cells: occupy_rect(6, 4) },
+];
+
+function occupy_rect(width: number, height: number): { x: number; y: number }[] {
+	const cells: { x: number; y: number }[] = [];
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			cells.push({ x, y });
+		}
+	}
+	return cells;
+}
+
+function foundation_cells(label: string): { x: number; y: number }[] {
+	const found = FOUNDATIONS.find((entry) => entry.name.toUpperCase() === label.toUpperCase());
+	return found?.cells ?? [{ x: 0, y: 0 }];
+}
+
+function occupies(origin: { x: number; y: number }, cells: { x: number; y: number }[], x: number, y: number): boolean {
+	return cells.some((cell) => origin.x + cell.x === x && origin.y + cell.y === y);
+}
+
+function read_tiberiums(rules: INIClass, overlays: OverlayType[]): TiberiumType[] {
+	const types: TiberiumType[] = [];
+	const count = rules.entry_count("Tiberiums");
+	for (let i = 0; i < count; i++) {
+		const name = rules.get_string("Tiberiums", rules.get_entry("Tiberiums", i));
+		if (!name) {
+			continue;
+		}
+		const image = rules.get_int(name, "Image", 1);
+		const large = image === 2;
+		types.push({
+			name,
+			color: rules.get_string(name, "Color", "DarkGreen") || "DarkGreen",
+			start: tiberium_overlay_start(image, overlays),
+			variety: 12,
+			ramp: large ? 0 : 8,
+		});
+	}
+	return types;
+}
+
+function tiberium_color(id: number, types: TiberiumType[]): string {
+	for (const type of types) {
+		if (id >= type.start && id < type.start + type.variety + type.ramp) {
+			return type.color.toUpperCase();
+		}
+	}
+	return (types[0]?.color ?? "DarkGreen").toUpperCase();
+}
+
+function make_sprite(
+	x: number,
+	y: number,
+	names: string[],
+	palette: "theater" | "unit",
+	layer: number,
+	extra: Partial<MapSprite> = {},
+): MapSprite {
+	return {
+		x,
+		y,
+		ox: 0,
+		oy: 0,
+		frame: 0,
+		names,
+		file: "",
+		palette,
+		scheme: "",
+		layer,
+		wall: "",
+		bright: "object",
+		extra_light: 0,
+		...extra,
+	};
+}
+
+function theater_filename(name: string, letter: string): string {
+	if (name.length < 2 || letter.length === 0) {
+		return name;
+	}
+	const second = name[1]!.toUpperCase();
+	if (second === "T" || second === "A") {
+		return `${name[0]}${letter}${name.slice(2)}`;
+	}
+	return name;
+}
+
+function list_types(ini: INIClass, section: string): string[] {
+	const names: string[] = [];
+	const count = ini.entry_count(section);
+	for (let i = 0; i < count; i++) {
+		const name = ini.get_string(section, ini.get_entry(section, i));
+		if (name.length > 0) {
+			names.push(name);
+		}
+	}
+	return names;
+}
+
+function read_overlay_type(rules: INIClass, art: INIClass, name: string): OverlayType {
+	const graphic = rules.get_string(name, "Image", name) || name;
+	return {
+		name,
+		graphic,
+		theater: art.get_bool(graphic, "Theater", false),
+		new_theater: art.get_bool(graphic, "NewTheater", false),
+		wall: rules.get_bool(name, "Wall", false),
+		tiberium: rules.get_bool(name, "Tiberium", false),
+		crate: rules.get_bool(name, "Crate", false),
+		bridge: is_bridge_name(name, graphic),
+	};
+}
+
+function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeType {
+	const graphic = rules.get_string(name, "Image", name) || name;
+	const art_image = art.get_string(graphic, "Image", graphic) || graphic;
+	const to_overlay = art.get_string(graphic, "ToOverlay", "");
+	const section = graphic;
+	const active: AnimOffset[] = [];
+	const anim_keys = [
+		["ActiveAnim", "ActiveAnimX", "ActiveAnimY"],
+		["ActiveAnimTwo", "ActiveAnimTwoX", "ActiveAnimTwoY"],
+		["ActiveAnimThree", "ActiveAnimThreeX", "ActiveAnimThreeY"],
+		["ActiveAnimFour", "ActiveAnimFourX", "ActiveAnimFourY"],
+	];
+	for (const keys of anim_keys) {
+		const stem = art.get_string(section, keys[0]!, "");
+		if (stem.length > 0) {
+			active.push({ stem, x: art.get_int(section, keys[1]!, 0), y: art.get_int(section, keys[2]!, 0) });
+		}
+	}
+	const upgrades = rules.get_int(name, "Upgrades", 0);
+	const powerup_loc: { x: number; y: number }[] = [];
+	for (let i = 1; i <= Math.max(upgrades, 3); i++) {
+		powerup_loc.push({
+			x: art.get_int(section, `PowerUp${i}LocXX`, 0),
+			y: art.get_int(section, `PowerUp${i}LocYY`, 0),
+		});
+	}
+	let foundation = art.get_string(graphic, "Foundation", "1x1") || "1x1";
+	const named_foundation = art.get_string(name, "Foundation", "");
+	if (named_foundation.length > 0) {
+		foundation = named_foundation;
+	}
+	return {
+		name,
+		graphic: art_image,
+		theater: art.get_bool(graphic, "Theater", false),
+		new_theater: art.get_bool(graphic, "NewTheater", false),
+		terrain_palette: art.get_bool(graphic, "TerrainPalette", false) || art.get_bool(art_image, "TerrainPalette", false),
+		invisible: rules.get_bool(name, "InvisibleInGame", false),
+		wall: rules.get_bool(name, "Wall", false) || to_overlay.length > 0,
+		voxel: art.get_bool(graphic, "Voxel", false),
+		powers_up: rules.get_string(name, "PowersUpBuilding", ""),
+		active,
+		powerup_loc,
+		occupy: foundation_cells(foundation),
+		bib: art.get_string(graphic, "BibShape", ""),
+		extra_light: art.get_int(graphic, "ExtraLight", 0),
+		light_visibility: rules.get_int(name, "LightVisibility", 5000),
+		light_intensity: Math.floor(rules.get_float(name, "LightIntensity", 0) * NORMAL_LIGHT + 0.1),
+		light_red: Math.floor(rules.get_float(name, "LightRedTint", 1) * NORMAL_LIGHT + 0.1),
+		light_green: Math.floor(rules.get_float(name, "LightGreenTint", 1) * NORMAL_LIGHT + 0.1),
+		light_blue: Math.floor(rules.get_float(name, "LightBlueTint", 1) * NORMAL_LIGHT + 0.1),
+	};
+}
+
+function overlay_draw_offset(type: OverlayType, frame: number): { ox: number; oy: number } {
+	let oy = 0;
+	if (type.tiberium || type.wall || type.crate) {
+		oy -= LEVEL_PIXEL_H;
+	}
+	if (type.bridge) {
+		oy -= (ISO_TILE_PIXEL_H >> 1) + 1;
+		if (frame >= OVERLAYDATA_BRIDGE_NS_FULL1 && frame <= OVERLAYDATA_BRIDGE_NS_END2) {
+			oy -= ISO_TILE_PIXEL_H >> 1;
+		}
+	}
+	return { ox: 0, oy };
+}
+
+function theater_stems(name: string, seed: TheaterSeed): string[] {
+	const swapped = theater_filename(name, seed.image_letter);
+	if (swapped.toUpperCase() === name.toUpperCase()) {
+		return [name];
+	}
+	return [swapped, name];
+}
+
+function overlay_files(type: OverlayType, seed: TheaterSeed): string[] {
+	if (type.theater) {
+		return theater_stems(type.graphic, seed).map((name) => `${name}.${seed.suffix}`);
+	}
+	const names = type.new_theater ? theater_stems(type.graphic, seed) : [type.graphic];
+	return names.flatMap((name) => [`${name}.SHP`, `${name}.${seed.suffix}`]);
+}
+
+function object_files(type: ShapeType, seed: TheaterSeed): string[] {
+	if (type.voxel) {
+		return [];
+	}
+	if (type.theater) {
+		return theater_stems(type.graphic, seed).map((name) => `${name}.${seed.suffix}`);
+	}
+	const names = type.new_theater ? theater_stems(type.graphic, seed) : [type.graphic];
+	return names.flatMap((name) => [`${name}.SHP`, `${name}.${seed.suffix}`]);
+}
+
+function anim_files(stem: string, seed: TheaterSeed, art?: INIClass): string[] {
+	const graphic = art?.get_string(stem, "Image", stem) || stem;
+	if (art?.get_bool(stem, "Theater", false) || art?.get_bool(graphic, "Theater", false)) {
+		return theater_stems(graphic, seed).map((name) => `${name}.${seed.suffix}`);
+	}
+	const names = theater_stems(graphic, seed);
+	if (names.every((name) => name.toUpperCase() !== graphic.toUpperCase())) {
+		names.push(graphic);
+	}
+	return names.flatMap((name) => [`${name}.SHP`, `${name}.${seed.suffix}`]);
+}
+
+async function load_ini(directory: GameDirectory, filename: string): Promise<INIClass | null> {
+	const packed = await cc_retrieve(directory, filename);
+	if (!packed) {
+		return null;
+	}
+	const ini = new INIClass();
+	return ini.load(packed) ? ini : null;
+}
+
+async function load_palette(
+	directory: GameDirectory,
+	filename: string,
+	log: (line: string) => void,
+): Promise<Uint16Array> {
+	const packed = await cc_retrieve(directory, filename);
+	if (!packed || packed.length < 768) {
+		log(`${filename} missing; using a fallback palette.`);
+	}
+	return read_palette(packed ?? new Uint8Array(0));
+}
+
+async function fetch_shape(
+	directory: GameDirectory,
+	cache: Map<string, ShapeSet | null>,
+	names: string[],
+): Promise<string | null> {
+	for (const name of names) {
+		const key = name.toUpperCase();
+		const cached = cache.get(key);
+		if (cached) {
+			return key;
+		}
+		if (cache.has(key)) {
+			continue;
+		}
+		const packed = await cc_retrieve(directory, name);
+		const shape = packed ? read_shp(packed) : null;
+		cache.set(key, shape);
+		if (shape) {
+			return key;
+		}
+	}
+	return null;
+}
+
+function parse_overlay_pack(
+	ini: INIClass,
+	types: OverlayType[],
+	seed: TheaterSeed,
+	tiberiums: TiberiumType[],
+): MapSprite[] {
+	const packed = ini.get_uublock("OverlayPack");
+	if (packed.length === 0) {
+		return [];
+	}
+	const data = lcw_straw_decompress(packed, MAP_CELL_W * MAP_CELL_H);
+	const extra = ini.get_uublock("OverlayDataPack");
+	const stages = extra.length > 0 ? lcw_straw_decompress(extra, MAP_CELL_W * MAP_CELL_H) : new Uint8Array(0);
+	const sprites: MapSprite[] = [];
+	const limit = Math.min(data.length, MAP_CELL_W * MAP_CELL_H);
+	for (let i = 0; i < limit; i++) {
+		const id = data[i]!;
+		if (id === OVERLAY_NONE) {
+			continue;
+		}
+		const type = types[id];
+		if (!type) {
+			continue;
+		}
+		const y = Math.floor(i / MAP_CELL_W);
+		const x = i - y * MAP_CELL_W;
+		const frame = stages[i] ?? 0;
+		const offset = overlay_draw_offset(type, frame);
+		sprites.push(
+			make_sprite(x, y, overlay_files(type, seed), type.tiberium || type.wall ? "unit" : "theater", 0, {
+				ox: offset.ox,
+				oy: offset.oy,
+				frame,
+				wall: type.wall ? type.name : "",
+				scheme: type.tiberium ? tiberium_color(id, tiberiums) : "",
+				bright: type.tiberium ? "day" : type.wall ? "object" : "tile",
+			}),
+		);
+	}
+	connect_walls(sprites);
+	return sprites;
+}
+
+function connect_walls(sprites: MapSprite[]): void {
+	const walls = new Map<string, MapSprite>();
+	for (const sprite of sprites) {
+		if (sprite.wall) {
+			walls.set(`${sprite.x},${sprite.y}`, sprite);
+		}
+	}
+	const dirs = [
+		{ x: 0, y: -1 },
+		{ x: 1, y: 0 },
+		{ x: 0, y: 1 },
+		{ x: -1, y: 0 },
+	];
+	for (const sprite of walls.values()) {
+		let icon = 0;
+		for (let i = 0; i < dirs.length; i++) {
+			const dir = dirs[i]!;
+			const next = walls.get(`${sprite.x + dir.x},${sprite.y + dir.y}`);
+			if (next && next.wall === sprite.wall) {
+				icon |= 1 << i;
+			}
+		}
+		sprite.frame = (sprite.frame & ~OVERLAYDATA_WALL_FRAME_MASK) | icon;
+	}
+}
+
+function parse_csv_cell(line: string): { name: string; x: number; y: number } | null {
+	const parts = line.split(",");
+	if (parts.length < 5) {
+		return null;
+	}
+	const name = parts[1]!.trim();
+	const x = Number.parseInt(parts[3]!.trim(), 10);
+	const y = Number.parseInt(parts[4]!.trim(), 10);
+	if (!name || !Number.isFinite(x) || !Number.isFinite(y)) {
+		return null;
+	}
+	return { name, x, y };
+}
+
+function parse_named_section(
+	ini: INIClass,
+	section: string,
+	types: Map<string, ShapeType>,
+	seed: TheaterSeed,
+	layer: number,
+): MapSprite[] {
+	const sprites: MapSprite[] = [];
+	const count = ini.entry_count(section);
+	for (let i = 0; i < count; i++) {
+		const parsed = parse_csv_cell(ini.get_string(section, ini.get_entry(section, i)));
+		if (!parsed) {
+			continue;
+		}
+		const type = types.get(parsed.name.toUpperCase());
+		if (!type || type.voxel || type.invisible || type.wall) {
+			continue;
+		}
+		const files = object_files(type, seed);
+		if (files.length === 0) {
+			continue;
+		}
+		sprites.push(make_sprite(parsed.x, parsed.y, files, type.terrain_palette ? "theater" : "unit", layer));
+	}
+	return sprites;
+}
+
+function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: TheaterSeed, art: INIClass): MapSprite[] {
+	const placed: { name: string; x: number; y: number; type: ShapeType }[] = [];
+	const count = ini.entry_count("Structures");
+	for (let i = 0; i < count; i++) {
+		const parsed = parse_csv_cell(ini.get_string("Structures", ini.get_entry("Structures", i)));
+		if (!parsed) {
+			continue;
+		}
+		const type = types.get(parsed.name.toUpperCase());
+		if (!type || type.voxel || type.invisible || type.wall) {
+			continue;
+		}
+		placed.push({ name: parsed.name.toUpperCase(), x: parsed.x, y: parsed.y, type });
+	}
+	const sprites: MapSprite[] = [];
+	const addon_at = new Map<string, number>();
+	for (const item of placed) {
+		if (item.type.powers_up) {
+			const want = item.type.powers_up.toUpperCase();
+			const parent = placed.find(
+				(other) => !other.type.powers_up && other.name === want && occupies(other, other.type.occupy, item.x, item.y),
+			);
+			if (!parent) {
+				continue;
+			}
+			const files = [...object_files(item.type, seed), ...anim_files(item.type.graphic, seed, art)];
+			if (files.length === 0) {
+				continue;
+			}
+			const key = `${parent.x},${parent.y}`;
+			const slot = addon_at.get(key) ?? 0;
+			addon_at.set(key, slot + 1);
+			const loc = parent.type.powerup_loc[slot] ?? { x: 0, y: 0 };
+			sprites.push(
+				make_sprite(parent.x, parent.y, files, item.type.terrain_palette ? "theater" : "unit", 4, {
+					ox: loc.x,
+					oy: loc.y,
+				}),
+			);
+			continue;
+		}
+		const files = object_files(item.type, seed);
+		if (files.length === 0) {
+			continue;
+		}
+		sprites.push(
+			make_sprite(item.x, item.y, files, item.type.terrain_palette ? "theater" : "unit", 3, {
+				extra_light: item.type.extra_light,
+			}),
+		);
+		if (item.type.bib.length > 0) {
+			sprites.push(
+				make_sprite(item.x, item.y, anim_files(item.type.bib, seed, art), item.type.terrain_palette ? "theater" : "unit", 4),
+			);
+		}
+		for (const anim of item.type.active) {
+			sprites.push(
+				make_sprite(item.x, item.y, anim_files(anim.stem, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
+					ox: anim.x,
+					oy: anim.y,
+				}),
+			);
+		}
+	}
+	return sprites;
+}
+
+function collect_lights(ini: INIClass, types: Map<string, ShapeType>): MapLightSource[] {
+	const lights: MapLightSource[] = [];
+	const count = ini.entry_count("Structures");
+	for (let i = 0; i < count; i++) {
+		const parsed = parse_csv_cell(ini.get_string("Structures", ini.get_entry("Structures", i)));
+		if (!parsed) {
+			continue;
+		}
+		const type = types.get(parsed.name.toUpperCase());
+		if (!type || type.voxel || type.wall || type.powers_up || type.light_intensity === 0) {
+			continue;
+		}
+		const at = building_light_coord(parsed.x, parsed.y, type.occupy);
+		lights.push({
+			x: at.x,
+			y: at.y,
+			visibility: type.light_visibility,
+			intensity: type.light_intensity,
+			red: type.light_red,
+			green: type.light_green,
+			blue: type.light_blue,
+		});
+	}
+	return lights;
+}
+
+function parse_terrain_section(ini: INIClass, types: Map<string, ShapeType>, seed: TheaterSeed): MapSprite[] {
+	const sprites: MapSprite[] = [];
+	const count = ini.entry_count("Terrain");
+	for (let i = 0; i < count; i++) {
+		const entry = ini.get_entry("Terrain", i);
+		const value = Number.parseInt(entry, 10);
+		const raw = ini.get_string("Terrain", entry);
+		const name = raw.split(",")[0]!.trim();
+		if (!Number.isFinite(value) || name.length === 0) {
+			continue;
+		}
+		const type = types.get(name.toUpperCase());
+		if (!type) {
+			continue;
+		}
+		const files = object_files(type, seed);
+		if (files.length === 0) {
+			continue;
+		}
+		sprites.push(make_sprite(value % 1000, Math.floor(value / 1000), files, "theater", 1));
+	}
+	return sprites;
+}
+
+export async function load_map_artwork(
+	directory: GameDirectory,
+	ini: INIClass,
+	theater_name: string,
+	log: (line: string) => void,
+): Promise<MapArtwork> {
+	const seed = theater_from_name(theater_name);
+	const rules = await load_ini(directory, "RULES.INI");
+	const art = await load_ini(directory, "ART.INI");
+	if (!rules) {
+		log("RULES.INI not found.");
+	}
+	if (!art) {
+		log("ART.INI not found.");
+	}
+	const rules_ini = rules ?? new INIClass();
+	const art_ini = art ?? new INIClass();
+	const theater_palette = await load_palette(directory, `ISO${seed.suffix}.PAL`, log);
+	const unit_palette = await load_palette(directory, `UNIT${seed.suffix}.PAL`, log);
+
+	const overlays = list_types(rules_ini, "OverlayTypes").map((name) => read_overlay_type(rules_ini, art_ini, name));
+	const tiberiums = read_tiberiums(rules_ini, overlays);
+	const schemes = new Map<string, Uint16Array>();
+	const color_count = rules_ini.entry_count("Colors");
+	for (let i = 0; i < color_count; i++) {
+		const entry = rules_ini.get_entry("Colors", i);
+		const hsv = parse_hsv(rules_ini, "Colors", entry);
+		if (hsv) {
+			schemes.set(entry.toUpperCase(), scheme_palette(unit_palette, hsv.h, hsv.s, hsv.v));
+		}
+	}
+	const buildings = new Map(
+		list_types(rules_ini, "BuildingTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
+	);
+	const terrains = new Map(
+		list_types(rules_ini, "TerrainTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
+	);
+	const infantry = new Map(
+		list_types(rules_ini, "InfantryTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
+	);
+
+	const overlay_packed = ini.get_uublock("OverlayPack");
+	const overlay_sprites = parse_overlay_pack(ini, overlays, seed, tiberiums);
+	const terrain_sprites = parse_terrain_section(ini, terrains, seed);
+	const structure_sprites = parse_structures(ini, buildings, seed, art_ini);
+	const infantry_sprites = parse_named_section(ini, "Infantry", infantry, seed, 2);
+	const sprites: MapSprite[] = [...overlay_sprites, ...terrain_sprites, ...structure_sprites, ...infantry_sprites];
+	const lighting = read_scenario_lighting(ini);
+	const lights = collect_lights(ini, buildings);
+	log(
+		`RULES types: ${overlays.length} overlays, ${buildings.size} buildings, ${terrains.size} terrain, ${infantry.size} infantry.`,
+	);
+	log(
+		`Tiberium: ${tiberiums.map((type) => `${type.name} ${type.color} @${type.start}`).join(", ") || "none"}; ${schemes.size} color schemes.`,
+	);
+	log(
+		`Lighting Ambient=${(lighting.ambient / 100).toFixed(2)} Ground=${lighting.ground} Level=${lighting.level}; ${lights.length} light sources.`,
+	);
+	log(
+		`Scenario lists ${ini.entry_count("Structures")} structures, ${ini.entry_count("Terrain")} terrain; OverlayPack ${overlay_packed.length} bytes.`,
+	);
+
+	const cache = new Map<string, ShapeSet | null>();
+	const shapes = new Map<string, ShapeSet>();
+	const ready: MapSprite[] = [];
+	const missing: string[] = [];
+	for (const sprite of sprites) {
+		const key = await fetch_shape(directory, cache, sprite.names);
+		if (!key) {
+			if (missing.length < 8) {
+				missing.push(sprite.names[0] ?? "?");
+			}
+			continue;
+		}
+		const shape = cache.get(key);
+		if (!shape) {
+			continue;
+		}
+		shapes.set(key, shape);
+		ready.push({ ...sprite, file: key });
+	}
+
+	ready.sort((a, b) => a.x + a.y - (b.x + b.y) || a.layer - b.layer);
+	log(
+		`Map objects: ${overlay_sprites.length} overlays, ${terrain_sprites.length} terrain, ${structure_sprites.length} structures, ${infantry_sprites.length} infantry; ${ready.length} sprites, ${shapes.size} SHP files.`,
+	);
+	if (missing.length > 0) {
+		log(`Missing SHP/TEM: ${missing.join(", ")}`);
+	}
+	return { sprites: ready, shapes, theater_palette, unit_palette, schemes, lighting, lights };
+}

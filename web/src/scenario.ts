@@ -12,6 +12,7 @@ import type { GameDirectory } from "./files";
 import { INIClass, type Rect } from "./ini";
 import { load_theater_previews, preview_cell_colors, type TilePreviewColors } from "./isotile";
 import { lzo_straw_decompress } from "./lzo";
+import { load_map_artwork } from "./objects";
 import { read_pcx } from "./pcx";
 import { canvas_mouse, present } from "./present";
 import { build_hicolor_pixel, DSurface } from "./surface";
@@ -266,6 +267,7 @@ export async function Show_Scenario(
 		return;
 	}
 
+	const artwork = await load_map_artwork(directory, ini, theater, log);
 	await Show_Tactical(
 		canvas,
 		directory,
@@ -278,6 +280,7 @@ export async function Show_Scenario(
 		name,
 		log,
 		cancelled,
+		artwork,
 	);
 }
 
