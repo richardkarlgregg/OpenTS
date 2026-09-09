@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>OpenTS web</title>
+		<link rel="stylesheet" href="/src/style.css" />
+	</head>
+	<body>
+		<header>
+			<h1>OpenTS web</h1>
+			<p>
+				Experimental TypeScript port. Choose a local Tiberian Sun folder.
+				Game files stay on your machine. Chromium blocks
+				<code>Program Files</code> from the other folder picker, so this
+				page uses a directory file input that can read the Steam install.
+			</p>
+			<button id="pick" type="button">Choose Tiberian Sun folder</button>
+			<input id="folder" type="file" hidden />
+		</header>
+		<canvas id="frame" width="640" height="400"></canvas>
+		<pre id="log"></pre>
+		<script type="module" src="/src/main.ts"></script>
+	</body>
+</html>

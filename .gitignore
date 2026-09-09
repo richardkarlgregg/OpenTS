@@ -51,6 +51,10 @@ cmake_install.cmake
 __pycache__/
 *.pyc
 
+# Web TypeScript port
+web/node_modules/
+web/dist/
+
 # Manual tooling temp snapshots (interrupted manage.py runs)
 manual/data/.manual-check-*/
 manual/data/.manual-generate-*/
