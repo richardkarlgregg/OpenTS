@@ -16,6 +16,7 @@ export class OptionsClass {
 	GameSpeed = 3;
 	ScrollRate = 3;
 	AutoScroll = true;
+	SidebarSorting = true;
 
 	Normalize_Delay(delay: number): number {
 		const adjust = [

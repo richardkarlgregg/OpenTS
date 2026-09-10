@@ -12,6 +12,8 @@ import language_rc from "../../code/language/language.rc?raw";
 
 export const TXT_NONE = 0;
 export const TXT_COPYRIGHT = 1;
+export const TXT_READY = 6;
+export const TXT_HOLD = 7;
 export const TXT_OK = 10;
 export const TXT_TAB_BUTTON_CONTROLS = 129;
 

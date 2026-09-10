@@ -166,6 +166,51 @@ export function blit_shape(
 	}
 }
 
+export function blit_shape_translucent50(
+	dest: DSurface,
+	palette: Uint16Array,
+	shape: ShapeSet,
+	frame: number,
+	x: number,
+	y: number,
+	clip: { x: number; y: number; w: number; h: number } | null = null,
+): void {
+	if (shape.frames.length === 0) {
+		return;
+	}
+	const index = ((frame % shape.frames.length) + shape.frames.length) % shape.frames.length;
+	const rec = shape.frames[index]!;
+	if (rec.width <= 0 || rec.height <= 0) {
+		return;
+	}
+	const dx = x + rec.x;
+	const dy = y + rec.y;
+	for (let row = 0; row < rec.height; row++) {
+		const sy = dy + row;
+		if (sy < 0 || sy >= dest.height) {
+			continue;
+		}
+		const src_row = row * rec.width;
+		const dest_row = sy * dest.width;
+		for (let col = 0; col < rec.width; col++) {
+			const pixel = rec.pixels[src_row + col]!;
+			if (pixel === 0) {
+				continue;
+			}
+			const sx = dx + col;
+			if (sx < 0 || sx >= dest.width) {
+				continue;
+			}
+			if (clip && (sx < clip.x || sx >= clip.x + clip.w || sy < clip.y || sy >= clip.y + clip.h)) {
+				continue;
+			}
+			const src = palette[pixel]!;
+			const dst = dest.pixels[dest_row + sx]!;
+			dest.pixels[dest_row + sx] = ((src & 0xf7de) >> 1) + ((dst & 0xf7de) >> 1);
+		}
+	}
+}
+
 const DARKEN_MASK = 0x7bef;
 
 export function blit_shape_shadow(dest: DSurface, shape: ShapeSet, frame: number, x: number, y: number, center: boolean): void {

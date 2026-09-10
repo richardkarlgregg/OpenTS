@@ -77,13 +77,47 @@ game.
   before the shroud pass so the shroud darkens it the way `SHAPE_ALPHA`
   would. `Pixel_To_Lepton` uses `PixelToCoordMatrix`. Bridge overlay cells
   lift `Pixel_To_Cell` by `BRIDGE_CELL_HEIGHT`. Cloak, fog of war, limpet
-  `SELECT.SHP` frames, and tile depth-buffer writes are not ported. Edge
-  scroll is `ScrollClass::Scroll_Edge`
+  `SELECT.SHP` frames, and tile depth-buffer writes are not ported. Sidebar
+  cameos come from `BuildingClass::Update_Buildables` /
+  `HouseClass::Can_Build` into `StripClass::Add` / `Sort`, drawn with
+  `CAMEO.PAL` and `DARKEN.SHP`. Map `ActsLike=` is a country index (GDI1A
+  stores `0`), not the house name. Left-clicking a cameo starts
+  `FactoryClass` production (`HouseClass::Begin_Production`); `GCLOCK2.SHP`
+  overlays the cameo (`SHAPE_TRANSLUCENT50`, frame `stage + 1`). Completed
+  buildings enter `Manual_Place`; left-click on a legal occupy list calls
+  `Place_Object`. Right-click suspends, then abandons (refund `Cost -
+  Balance`).   Completed infantry and vehicles leave through
+  `BuildingClass::Exit_Object` (`Find_Exit_Cell`, GDI barracks prefers
+  origin+(1,2) plus `ExitCoord=`). Infantry and vehicles auto-place on
+  `FactoryClass::Has_Completed` (`StripClass::AI` `PLACE`/`CELL_NONE`);
+  buildings still wait for a Ready click. Each queued infantry or vehicle
+  also auto-exits when its turn completes. Non-building cameos queue up to
+  RULES `[General] MaximumQueuedObjects` (default 5); buildings cannot.
+  Queue counts print at `QUEUE_COUNT_X_OFFSET`. They walk with
+  `WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
+  `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Path
+  search is `AStarClass::Find_Path_Regular` (cell A*, Euclidean heuristic,
+  facing tie-break costs). `FootClass::Can_Reach` forbids a height change
+  other than 0, or 1 when the lower cell has a TMP ramp.
+  `CliffBackImpassability=2` marks cells 4+ below listed neighbours as
+  `LAND_ROCK`. Overlay `Wall=yes` cells are impassable. Owned
+  `Gate=yes` buildings return `MOVE_CLOSED_GATE` until
+  `MapClass::Try_Open_Gate` / `BuildingClass::Open_Gate` finishes
+  (`GateStages`, `DeployTime`, `GateCloseDelay`). Gate `Sort_Y` is 16
+  leptons earlier so infantry and vehicles draw in front. Owned techno
+  `Look()` / `Map.Sight_From` on cell change. Left-click a selected
+  foot unit on mapped ground to `Assign_Destination`. Right-click on
+  empty tactical (`Mouse_Right_Release`) is `Unselect_All`. With a foot unit
+  selected, empty tactical cells use `MOUSE_CAN_MOVE` or `MOUSE_NO_MOVE`.
+  `FootClass::Draw_Action_Line` draws the movement line (`RGB(0,170,0)`)
+  for `ActionLineTimer` (25) frames after the order. Escape cancels placement first, then leaves the map. Strip
+  scroll arrows (`R-UP.SHP` / `R-DN.SHP`) move `TopIndex`. Edge scroll is
+  `ScrollClass::Scroll_Edge`
   (arrow cursors `MOUSE_N`…`MOUSE_NW`, barred when `Scroll_Dir` cannot
   move). The camera is `TacticalCoord` (view center); `TacPixel` subtracts
   half the tactical rect before blit, and `Tactical_Position_Limits` clamp
   that center. Arrow keys also pan. Escape returns to the menu. Skirmish lists
-  `MISSIONS.PKT` and loose `.MPR` maps the same way. Simulation, movies,
+  `MISSIONS.PKT` and loose `.MPR` maps the same way. Aircraft factory exit, movies,
   and save/load are not playable yet.
 
 ## Commands

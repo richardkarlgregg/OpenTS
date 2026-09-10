@@ -29,8 +29,24 @@ import {
 	type CellLight,
 	type ScenarioLighting,
 } from "./light";
-import { MouseClass, MOUSE_CAN_SELECT, MOUSE_N, MOUSE_NO_N, MOUSE_NORMAL } from "./mouse";
-import { Anim_Logic, type MapArtwork, type MapSprite } from "./objects";
+import { MouseClass, MOUSE_CAN_MOVE, MOUSE_CAN_SELECT, MOUSE_N, MOUSE_NO_MOVE, MOUSE_NO_N, MOUSE_NORMAL } from "./mouse";
+import {
+	ActionLineTimer,
+	Action_Line_AI,
+	Anim_Logic,
+	Assign_Move,
+	Cameo_Left,
+	Cameo_Right,
+	Can_Move_To,
+	Can_Place_Building,
+	Factory_AI,
+	Foot_AI,
+	Gate_AI,
+	Place_Completed_Foot,
+	Place_Pending,
+	type MapArtwork,
+	type MapSprite,
+} from "./objects";
 import { Options } from "./options";
 import { canvas_mouse, present, type CanvasLabel } from "./present";
 import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
@@ -41,6 +57,8 @@ import {
 	draw_hud,
 	load_sidebar,
 	over_tactical,
+	Sidebar_Cameo_At,
+	Sidebar_Click,
 	SCREEN_H,
 	SCREEN_W,
 	TAC_H,
@@ -50,7 +68,9 @@ import {
 	type SidebarArt,
 } from "./sidebar";
 import { TIMER_SECOND } from "./stimer";
-import { DSurface } from "./surface";
+import { build_hicolor_pixel, DSurface } from "./surface";
+import { Cell_Center } from "./walk";
+import type { FactoryObject } from "./factory";
 
 type IsoCell = { x: number; y: number; height: number; tile: number; subtile: number };
 
@@ -122,6 +142,39 @@ function cell_pixel(cell: { x: number; y: number; height: number }): Point2D {
 		x: (cell.x - cell.y) * (ISO_TILE_PIXEL_W >> 1) - (ISO_TILE_PIXEL_W >> 1),
 		y: (cell.x + cell.y) * (ISO_TILE_PIXEL_H >> 1) - cell.height * LEVEL_PIXEL_H,
 	};
+}
+
+function fill_iso_diamond(
+	dest: DSurface,
+	origin: Point2D,
+	heights: Map<string, number>,
+	cell: Point2D,
+	color: number,
+): void {
+	const height = heights.get(`${cell.x},${cell.y}`) ?? 0;
+	const pixel = cell_pixel({ x: cell.x, y: cell.y, height });
+	const dx = pixel.x - origin.x;
+	const dy = pixel.y - origin.y;
+	const hw = ISO_TILE_PIXEL_W >> 1;
+	const hh = ISO_TILE_PIXEL_H >> 1;
+	for (let row = 0; row < ISO_TILE_PIXEL_H; row++) {
+		const sy = dy + row;
+		if (sy < 0 || sy >= dest.height) {
+			continue;
+		}
+		const dist = row < hh ? row : ISO_TILE_PIXEL_H - 1 - row;
+		const half = Math.trunc((dist * ISO_TILE_PIXEL_W) / ISO_TILE_PIXEL_H);
+		const x0 = dx + hw - half;
+		const x1 = dx + hw + half;
+		const dest_row = sy * dest.width;
+		for (let sx = x0; sx < x1; sx++) {
+			if (sx < 0 || sx >= dest.width) {
+				continue;
+			}
+			const dst = dest.pixels[dest_row + sx]!;
+			dest.pixels[dest_row + sx] = ((color & 0xf7de) >> 1) + ((dst & 0xf7de) >> 1);
+		}
+	}
 }
 
 function playrect_to_cell(point: Point2D, play_width: number): Point2D {
@@ -247,6 +300,7 @@ function draw_view(
 	palettes: Map<string, Uint16Array>,
 	shroud: ShroudMap | null,
 	selected: MapSprite | null,
+	ghost: { cell: Point2D; legal: boolean } | null,
 ): DSurface {
 	const origin = view_origin(camera);
 	const frame = new DSurface(VIEW_W, VIEW_H);
@@ -352,6 +406,21 @@ function draw_view(
 		if (selected) {
 			draw_selection_post(frame, origin, selected, artwork, heights, ramps, color);
 		}
+		if (ActionLineTimer > 0) {
+			draw_move_lines(frame, origin, artwork, heights, ramps);
+		}
+		if (ghost && artwork.production.pending) {
+			const tint = ghost.legal ? build_hicolor_pixel(0, 200, 0) : build_hicolor_pixel(200, 0, 0);
+			for (const offset of artwork.production.pending.occupy) {
+				fill_iso_diamond(frame, origin, heights, { x: ghost.cell.x + offset.x, y: ghost.cell.y + offset.y }, tint);
+			}
+			for (const sprite of artwork.production.pending.sprites) {
+				draw_sprite({ ...sprite, x: ghost.cell.x, y: ghost.cell.y }, true);
+			}
+			for (const sprite of artwork.production.pending.sprites) {
+				draw_sprite({ ...sprite, x: ghost.cell.x, y: ghost.cell.y }, false);
+			}
+		}
 	}
 	if (shroud) {
 		Draw_Shroud(frame, origin, cells, cell_pixel, shroud, artwork?.shroud ?? null);
@@ -403,6 +472,34 @@ function Coord_To_Pixel(coord: Coord, origin: Point2D): Point2D {
 
 function Convert_Pixel(palette: Uint16Array, pixel: number): number {
 	return palette[pixel & 255] ?? 0;
+}
+
+function draw_move_lines(
+	frame: DSurface,
+	origin: Point2D,
+	artwork: MapArtwork,
+	heights: Map<string, number>,
+	ramps: Map<string, number>,
+): void {
+	const color = build_hicolor_pixel(0, 170, 0);
+	for (const sprite of artwork.sprites) {
+		const foot = sprite.foot;
+		if (!sprite.owned || !foot?.dest) {
+			continue;
+		}
+		const dest = Cell_Center(foot.dest);
+		const start = Coord_To_Pixel(
+			{ x: foot.lx, y: foot.ly, z: Get_Height({ x: foot.lx, y: foot.ly }, heights, ramps) },
+			origin,
+		);
+		const end = Coord_To_Pixel(
+			{ x: dest.x, y: dest.y, z: Get_Height({ x: dest.x, y: dest.y }, heights, ramps) },
+			origin,
+		);
+		frame.draw_line(start.x, start.y, end.x, end.y, color);
+		frame.fill_rect(start.x - 1, start.y - 1, 3, 3, color);
+		frame.fill_rect(end.x - 1, end.y - 1, 3, 3, color);
+	}
 }
 
 function Pixel_To_Lepton(pixel: Point2D): Point2D {
@@ -754,8 +851,9 @@ function composite_view(
 	shroud: ShroudMap | null,
 	selected: MapSprite | null,
 	radar: RadarMap | null,
+	ghost: { cell: Point2D; legal: boolean } | null,
 ): { frame: DSurface; labels: CanvasLabel[] } {
-	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected);
+	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected, ghost);
 	const frame = new DSurface(SCREEN_W, SCREEN_H);
 	frame.blit_from(TAC_X, TAC_Y, tactical);
 	const radar_on = radar?.exists === true;
@@ -766,6 +864,7 @@ function composite_view(
 		artwork?.power_output ?? 0,
 		artwork?.power_drain ?? 0,
 		radar_on,
+		artwork?.sidebar ?? null,
 	);
 	if (radar && radar_on) {
 		Render_Radar(frame, radar, cells, tiles, shroud, artwork?.sprites ?? [], camera);
@@ -970,6 +1069,15 @@ export async function Show_Tactical(
 		log("No In_Radar cells to draw.");
 		return;
 	}
+	if (artwork) {
+		artwork.terrain.clear();
+		for (const cell of draw_list) {
+			artwork.terrain.set(`${cell.x},${cell.y}`, {
+				height: cell.height,
+				ramp: fetch_subtile(tiles, cell.tile, cell.subtile)?.ramp ?? 0,
+			});
+		}
+	}
 	const lighting = artwork?.lighting ?? DAYLIGHT;
 	const palettes = new Map<string, Uint16Array>();
 	const cell_lights = gather_cell_lights(draw_list, lighting, artwork);
@@ -991,8 +1099,11 @@ export async function Show_Tactical(
 	for (const cell of draw_list) {
 		heights.set(`${cell.x},${cell.y}`, cell.height);
 	}
+	const cell_keys = new Set(heights.keys());
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
 	let selected: MapSprite | null = null;
+	const exits: FactoryObject[] = [];
+	let exiting = false;
 	if (radar) {
 		log(`Radar ${radar_exists ? "on" : "off"} ${radar.blit_w}x${radar.blit_h}.`);
 	}
@@ -1015,7 +1126,33 @@ export async function Show_Tactical(
 	let raf = 0;
 
 	const paint = (): void => {
-		const view = composite_view(tiles, draw_list, camera, artwork, cell_lights, palettes, hud, shroud, selected, radar);
+		let ghost: { cell: Point2D; legal: boolean } | null = null;
+		if (artwork?.production.pending && over_tactical(mouse.Point.x, mouse.Point.y)) {
+			const origin = view_origin(camera);
+			const cell = Pixel_To_Cell(
+				{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+				origin,
+				heights,
+				bridges,
+			);
+			ghost = {
+				cell,
+				legal: Can_Place_Building(artwork, cell, play, shroud, cell_keys),
+			};
+		}
+		const view = composite_view(
+			tiles,
+			draw_list,
+			camera,
+			artwork,
+			cell_lights,
+			palettes,
+			hud,
+			shroud,
+			selected,
+			radar,
+			ghost,
+		);
 		if (mouse.MouseShapes) {
 			mouse.Draw_Mouse(view.frame, hud.palette);
 		}
@@ -1027,9 +1164,34 @@ export async function Show_Tactical(
 		if (!artwork) {
 			return;
 		}
+		const ready = Factory_AI(artwork);
+		Gate_AI(artwork);
+		Foot_AI(artwork, play, cell_keys, shroud);
+		Action_Line_AI();
 		for (const sprite of artwork.sprites) {
 			Anim_Logic(sprite);
 		}
+		if (ready.length) {
+			exits.push(...ready);
+		}
+		if (!exiting && exits.length > 0) {
+			exiting = true;
+			const batch = exits.splice(0, exits.length);
+			void (async () => {
+				for (const object of batch) {
+					await Place_Completed_Foot(directory, artwork, object, play, cell_keys, shroud);
+				}
+			})().finally(() => {
+				exiting = false;
+			});
+		}
+	};
+
+	const sync_radar = (): void => {
+		if (!radar || !artwork) {
+			return;
+		}
+		radar.exists = (artwork.free_radar || artwork.has_radar) && artwork.power_output >= artwork.power_drain;
 	};
 
 	const system_tick = (): void => {
@@ -1042,6 +1204,7 @@ export async function Show_Tactical(
 	};
 
 	await new Promise<void>((resolve) => {
+		let busy = false;
 		const finish = (): void => {
 			cancelAnimationFrame(raf);
 			canvas.style.cursor = previous_cursor;
@@ -1066,7 +1229,22 @@ export async function Show_Tactical(
 		const on_down = (event: MouseEvent): void => {
 			event.preventDefault();
 			on_move(event);
-			if (event.button !== 0) {
+			if (event.button === 2) {
+				if (artwork && mouse.Point.x >= TAC_W) {
+					const entry = Sidebar_Cameo_At(mouse.Point, hud, artwork.sidebar);
+					if (entry) {
+						Cameo_Right(artwork, entry);
+					}
+					return;
+				}
+				if (artwork?.production.pending) {
+					artwork.production.pending = null;
+					return;
+				}
+				selected = null;
+				return;
+			}
+			if (event.button !== 0 || busy) {
 				return;
 			}
 			if (radar && over_radar(mouse.Point.x, mouse.Point.y, radar)) {
@@ -1081,9 +1259,61 @@ export async function Show_Tactical(
 				}
 				return;
 			}
+			if (artwork && mouse.Point.x >= TAC_W) {
+				if (Sidebar_Click(mouse.Point, hud, artwork.sidebar)) {
+					return;
+				}
+				const entry = Sidebar_Cameo_At(mouse.Point, hud, artwork.sidebar);
+				if (entry) {
+					busy = true;
+					void Cameo_Left(directory, artwork, entry, play, cell_keys, shroud).then(() => {
+						if (artwork.production.pending) {
+							selected = null;
+						}
+					}).finally(() => {
+						busy = false;
+					});
+				}
+				return;
+			}
+			if (artwork?.production.pending && over_tactical(mouse.Point.x, mouse.Point.y)) {
+				const origin = view_origin(camera);
+				const cell = Pixel_To_Cell(
+					{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+					origin,
+					heights,
+					bridges,
+				);
+				busy = true;
+				void Place_Pending(directory, artwork, cell, play, shroud, cell_keys).then((placed) => {
+					if (placed) {
+						selected = null;
+						sync_radar();
+					}
+				}).finally(() => {
+					busy = false;
+				});
+				return;
+			}
 			scroll.mouse_down = true;
 			if (artwork) {
-				selected = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+				const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+				if (
+					!hover &&
+					selected?.foot &&
+					over_tactical(mouse.Point.x, mouse.Point.y)
+				) {
+					const origin = view_origin(camera);
+					const cell = Pixel_To_Cell(
+						{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+						origin,
+						heights,
+						bridges,
+					);
+					Assign_Move(artwork, selected, cell, play, cell_keys);
+				} else {
+					selected = hover;
+				}
 			}
 		};
 		const on_up = (): void => {
@@ -1093,7 +1323,16 @@ export async function Show_Tactical(
 			event.preventDefault();
 		};
 		const on_key = (event: KeyboardEvent): void => {
-			if (cancelled() || event.key === "Escape") {
+			if (cancelled()) {
+				finish();
+				return;
+			}
+			if (event.key === "Escape") {
+				if (artwork?.production.pending) {
+					artwork.production.pending = null;
+					event.preventDefault();
+					return;
+				}
 				finish();
 				return;
 			}
@@ -1126,13 +1365,32 @@ export async function Show_Tactical(
 			camera = scroll_edge(mouse, camera, play, local, scroll, now);
 			if (
 				artwork &&
-				(mouse.CurrentMouseShape === MOUSE_NORMAL || mouse.CurrentMouseShape === MOUSE_CAN_SELECT)
+				(mouse.CurrentMouseShape === MOUSE_NORMAL ||
+					mouse.CurrentMouseShape === MOUSE_CAN_SELECT ||
+					mouse.CurrentMouseShape === MOUSE_CAN_MOVE ||
+					mouse.CurrentMouseShape === MOUSE_NO_MOVE)
 			) {
-				if (over_radar(mouse.Point.x, mouse.Point.y, radar)) {
+				if (artwork.production.pending || over_radar(mouse.Point.x, mouse.Point.y, radar)) {
 					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
 				} else {
 					const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
-					mouse.Override_Mouse_Shape(hover ? MOUSE_CAN_SELECT : MOUSE_NORMAL, false);
+					if (hover) {
+						mouse.Override_Mouse_Shape(MOUSE_CAN_SELECT, false);
+					} else if (selected?.foot && over_tactical(mouse.Point.x, mouse.Point.y)) {
+						const origin = view_origin(camera);
+						const cell = Pixel_To_Cell(
+							{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+							origin,
+							heights,
+							bridges,
+						);
+						mouse.Override_Mouse_Shape(
+							Can_Move_To(artwork, selected, cell, play, cell_keys) ? MOUSE_CAN_MOVE : MOUSE_NO_MOVE,
+							false,
+						);
+					} else {
+						mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+					}
 				}
 			}
 			paint();

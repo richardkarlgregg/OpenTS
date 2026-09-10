@@ -20,6 +20,8 @@ export const MOUSE_NORMAL = 0;
 export const MOUSE_N = 1;
 export const MOUSE_NO_N = 9;
 export const MOUSE_CAN_SELECT = 17;
+export const MOUSE_CAN_MOVE = 18;
+export const MOUSE_NO_MOVE = 19;
 export const MOUSE_COUNT = 67;
 
 const MOUSE_HOTSPOT_MIN = 0;

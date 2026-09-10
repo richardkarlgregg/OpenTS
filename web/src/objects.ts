@@ -11,8 +11,9 @@
  ******************************************************************************/
 
 import { cc_retrieve } from "./ccfile";
+import { FactoryClass, Time_To_Build, type FactoryObject } from "./factory";
 import type { GameDirectory } from "./files";
-import { INIClass } from "./ini";
+import { INIClass, type Point2D, type Rect } from "./ini";
 import { ISO_TILE_PIXEL_H, ISO_TILE_PIXEL_W, LEVEL_PIXEL_H } from "./isotile";
 import { lcw_straw_decompress } from "./lcw";
 import {
@@ -24,11 +25,37 @@ import {
 } from "./light";
 import { Options } from "./options";
 import { read_palette, read_shp, type ShapeSet } from "./shp";
-import type { SightLooker } from "./shroud";
+import type { SightLooker, ShroudMap } from "./shroud";
+import {
+	Cameo_Category,
+	Cameo_Group,
+	Make_Strips,
+	Sort_Strip,
+	Strip_Add,
+	Which_Column,
+	type BuildType,
+	type CameoKind,
+	type SidebarStrips,
+} from "./sidebar";
 import { TICKS_PER_MINUTE } from "./stimer";
 import { build_hicolor_pixel } from "./surface";
 import { theater_from_name, type TheaterSeed } from "./theater";
 import { read_vxl, type VoxelModel } from "./voxlib";
+import {
+	Apply_Coord,
+	Assign_Destination,
+	Can_Reach,
+	Cell_Center,
+	Coord_Cell,
+	Direction_Facing,
+	Facing_Dir256,
+	Make_Foot,
+	Movement_AI,
+	Scale_To_256,
+	type CellTerrain,
+	type FootState,
+	type PathEnter,
+} from "./walk";
 
 const MAP_CELL_W = 512;
 const MAP_CELL_H = 512;
@@ -37,6 +64,13 @@ const OVERLAYDATA_WALL_FRAME_MASK = 0x0f;
 const OVERLAYDATA_BRIDGE_NS_FULL1 = 9;
 const OVERLAYDATA_BRIDGE_NS_END2 = 17;
 const CELL_LEPTON = 256;
+const GATE_START_OPENING = 0;
+const GATE_OPENING = 1;
+const GATE_OPEN = 2;
+const GATE_START_CLOSING = 3;
+const GATE_CLOSING = 4;
+const GATE_CLOSED = 5;
+export let ActionLineTimer = 0;
 const HUMAN_SHAPE = [7, 7, 6, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 7, 7];
 const STOPPING_COORD = [
 	{ x: CELL_LEPTON / 2, y: CELL_LEPTON / 2 },
@@ -67,6 +101,17 @@ export type SpriteSelect =
 	| { kind: "box"; pre: boolean; lx: number; ly: number; lz: number }
 	| { kind: "shape"; frame: number };
 
+export type GateState = {
+	stages: number;
+	deploy: number;
+	close_delay: number;
+	status: number;
+	hold: number;
+	door_count: number;
+	door_active: boolean;
+	door_up: boolean;
+};
+
 export type MapSprite = {
 	x: number;
 	y: number;
@@ -94,6 +139,10 @@ export type MapSprite = {
 	health_ratio: number;
 	veteran: boolean;
 	bridge: boolean;
+	owned: boolean;
+	type_name: string;
+	foot: FootState | null;
+	gate: GateState | null;
 };
 
 export type MapArtwork = {
@@ -116,6 +165,38 @@ export type MapArtwork = {
 	power_drain: number;
 	has_radar: boolean;
 	free_radar: boolean;
+	sidebar: SidebarStrips;
+	production: ProductionState;
+	terrain: Map<string, CellTerrain>;
+};
+
+export type PendingPlace = {
+	kind: CameoKind;
+	name: string;
+	occupy: { x: number; y: number }[];
+	adjacent: number;
+	sprites: MapSprite[];
+};
+
+export type ProductionState = {
+	player: string;
+	acts_like: string;
+	tech_level: number;
+	groups: Record<string, string[]>;
+	buildings: Map<string, ShapeType>;
+	infantry: Map<string, ShapeType>;
+	units: Map<string, ShapeType>;
+	tables: Record<CameoKind, ShapeType[]>;
+	counts: Map<string, number>;
+	seed: TheaterSeed;
+	scheme: string;
+	blip: number;
+	build_speed: number;
+	factories: Map<CameoKind, FactoryClass>;
+	pending: PendingPlace | null;
+	art: INIClass;
+	max_queue: number;
+	cliff_back: number;
 };
 
 type OverlayType = {
@@ -135,7 +216,7 @@ type AnimOffset = {
 	y: number;
 };
 
-type ShapeType = {
+export type ShapeType = {
 	name: string;
 	graphic: string;
 	voxel_stem: string;
@@ -171,6 +252,28 @@ type ShapeType = {
 	radar: boolean;
 	zheight: number;
 	core_defender: boolean;
+	to_build: string;
+	tech_level: number;
+	owners: string[];
+	prerequisite: string[];
+	cameo: string;
+	cameo_sort: number;
+	build_limit: number;
+	label: string;
+	gate: boolean;
+	sort_defense: boolean;
+	cost: number;
+	adjacent: number;
+	speed: number;
+	gdi_barracks: boolean;
+	nod_barracks: boolean;
+	exit_coord: Point2D;
+	walk_frame: number;
+	walk_count: number;
+	walk_jump: number;
+	gate_stages: number;
+	deploy_time: number;
+	gate_close_delay: number;
 };
 
 type TiberiumType = {
@@ -412,6 +515,48 @@ function occupies(origin: { x: number; y: number }, cells: { x: number; y: numbe
 	return cells.some((cell) => origin.x + cell.x === x && origin.y + cell.y === y);
 }
 
+function sprite_depth(sprite: MapSprite): number {
+	let depth = (sprite.x + sprite.y) * CELL_LEPTON;
+	if (sprite.gate) {
+		depth -= 16;
+	}
+	return depth;
+}
+
+function sprite_rank(sprite: MapSprite): number {
+	if (sprite.rtti === "infantry" || sprite.rtti === "unit" || sprite.rtti === "aircraft") {
+		return 1;
+	}
+	return 0;
+}
+
+function compare_sprites(a: MapSprite, b: MapSprite): number {
+	const depth = sprite_depth(a) - sprite_depth(b);
+	if (depth !== 0) {
+		return depth;
+	}
+	const rank = sprite_rank(a) - sprite_rank(b);
+	if (rank !== 0) {
+		return rank;
+	}
+	return a.layer - b.layer;
+}
+
+function Sort_Sprites(artwork: MapArtwork): void {
+	artwork.sprites.sort(compare_sprites);
+}
+
+function Look(artwork: MapArtwork, sprite: MapSprite, shroud: ShroudMap | null): void {
+	if (!shroud || !sprite.owned) {
+		return;
+	}
+	const type = type_for_sprite(artwork, sprite);
+	if (!type || type.sight <= 0) {
+		return;
+	}
+	shroud.Sight_From(sprite.x, sprite.y, type.sight);
+}
+
 function read_tiberiums(rules: INIClass, overlays: OverlayType[]): TiberiumType[] {
 	const types: TiberiumType[] = [];
 	const count = rules.entry_count("Tiberiums");
@@ -477,8 +622,35 @@ function make_sprite(
 		health_ratio: 1,
 		veteran: false,
 		bridge: false,
+		owned: false,
+		type_name: "",
+		foot: null,
+		gate: null,
 		...extra,
 	};
+}
+
+function Make_Gate(type: ShapeType): GateState {
+	return {
+		stages: Math.max(1, type.gate_stages),
+		deploy: Math.max(1, Math.round(type.deploy_time * TICKS_PER_MINUTE) | 0),
+		close_delay: Math.max(1, Math.round(type.gate_close_delay * TICKS_PER_MINUTE) | 0),
+		status: GATE_CLOSED,
+		hold: 0,
+		door_count: 0,
+		door_active: false,
+		door_up: false,
+	};
+}
+
+export function Reset_Action_Line_Timer(): void {
+	ActionLineTimer = 25;
+}
+
+export function Action_Line_AI(): void {
+	if (ActionLineTimer > 0) {
+		ActionLineTimer -= 1;
+	}
 }
 
 type AnimTypeData = {
@@ -696,7 +868,71 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		radar: rules.get_bool(name, "Radar", false),
 		zheight: art.get_int(graphic, "Height", 1),
 		core_defender: rules.get_bool(name, "IsCoreDefender", false),
+		to_build: rtti_from_name(rules.get_string(name, "Factory", "")),
+		tech_level: rules.get_int(name, "TechLevel", 255),
+		owners: csv(rules.get_string(name, "Owner", "")),
+		prerequisite: csv(rules.get_string(name, "Prerequisite", "")),
+		cameo: (art.get_string(art_image, "Cameo", "") || art.get_string(graphic, "Cameo", "") || "XXICON").toUpperCase(),
+		cameo_sort: rules.get_int(name, "CameoSortOrder", 0),
+		build_limit: rules.get_int(name, "BuildLimit", 0x7fffffff),
+		label: rules.get_string(name, "Name", name) || name,
+		gate: rules.get_bool(name, "Gate", false),
+		sort_defense: rules.get_bool(name, "SortCameoAsBaseDefense", rules.get_bool(name, "IsBaseDefense", false)),
+		cost: rules.get_int(name, "Cost", 0),
+		adjacent: rules.get_int(name, "Adjacent", 3),
+		speed: Scale_To_256(rules.get_int(name, "Speed", 0)),
+		gdi_barracks: rules.get_bool(name, "GDIBarracks", false),
+		nod_barracks: rules.get_bool(name, "NODBarracks", false),
+		exit_coord: rules.get_point(name, "ExitCoord", { x: 0, y: 0 }),
+		...read_walk_seq(art, graphic, art_image),
+		gate_stages: art.get_int(graphic, "GateStages", 9),
+		deploy_time: rules.get_float(name, "DeployTime", 0),
+		gate_close_delay: rules.get_float(name, "GateCloseDelay", 0),
 	};
+}
+
+function csv(value: string): string[] {
+	return value
+		.split(",")
+		.map((part) => part.trim())
+		.filter((part) => part.length > 0);
+}
+
+function rtti_from_name(raw: string): string {
+	const name = raw.replace(/\s/g, "").toLowerCase();
+	if (name === "buildingtype" || name === "building") {
+		return "BuildingType";
+	}
+	if (name === "infantrytype" || name === "infantry") {
+		return "InfantryType";
+	}
+	if (name === "unittype" || name === "unit" || name === "vehicletype") {
+		return "UnitType";
+	}
+	if (name === "aircrafttype" || name === "aircraft") {
+		return "AircraftType";
+	}
+	return "";
+}
+
+function Acts_Like_From(ini: INIClass, player: string, rules: INIClass): string {
+	const houses = list_types(rules, "Houses");
+	const fallback = player.toUpperCase();
+	const raw = ini.get_string(player, "ActsLike", "").trim();
+	if (!raw || raw.toLowerCase() === "<none>") {
+		return fallback;
+	}
+	const named = houses.find((name) => name.toUpperCase() === raw.toUpperCase());
+	if (named) {
+		return named.toUpperCase();
+	}
+	if (/^-?\d+$/.test(raw)) {
+		const index = Number.parseInt(raw, 10);
+		if (index >= 0 && index < houses.length) {
+			return houses[index]!.toUpperCase();
+		}
+	}
+	return fallback;
 }
 
 function read_power(rules: INIClass, name: string): { output: number; drain: number } {
@@ -751,6 +987,17 @@ function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
 	};
 }
 
+function read_walk_seq(art: INIClass, graphic: string, art_image: string): { walk_frame: number; walk_count: number; walk_jump: number } {
+	const seq = art.get_string(graphic, "Sequence", "") || art.get_string(art_image, "Sequence", "");
+	const walk = seq.length > 0 ? art.get_string(seq, "Walk", "") : "";
+	const bits = walk.split(",");
+	return {
+		walk_frame: Number.parseInt(bits[0]?.trim() ?? "", 10) || 0,
+		walk_count: Number.parseInt(bits[1]?.trim() ?? "", 10) || 1,
+		walk_jump: Number.parseInt(bits[2]?.trim() ?? "", 10) || 0,
+	};
+}
+
 function dir256_raw(dir: number): number {
 	return ((dir & 255) << 8) & 0xffff;
 }
@@ -789,6 +1036,15 @@ function infantry_ready_frame(type: ShapeType, dir: number): number {
 		shapenum += (HUMAN_SHAPE[round_facing(dir256_raw(dir), 10) % 32] ?? 0) * type.ready_jump;
 	}
 	return shapenum + type.ready_frame;
+}
+
+function infantry_walk_frame(type: ShapeType, dir: number, stage: number): number {
+	const count = Math.max(1, type.walk_count);
+	let shapenum = stage % count;
+	if (type.walk_jump > 0) {
+		shapenum += (HUMAN_SHAPE[round_facing(dir256_raw(dir), 10) % 32] ?? 0) * type.walk_jump;
+	}
+	return shapenum + type.walk_frame;
 }
 
 function sub_pixel(sub: number): { ox: number; oy: number } {
@@ -1111,6 +1367,8 @@ function parse_infantry(
 				rtti: "infantry",
 				health_ratio: ini_health_ratio(parsed.health),
 				veteran: parsed.veteran,
+				type_name: type.name,
+				foot: Make_Foot({ x: parsed.x, y: parsed.y }, type.speed),
 			}),
 		);
 	}
@@ -1146,6 +1404,8 @@ function parse_units(
 			rtti: rtti as "unit" | "aircraft",
 			health_ratio: ini_health_ratio(parsed.health),
 			veteran: parsed.veteran,
+			type_name: type.name,
+			foot: rtti === "aircraft" ? null : Make_Foot({ x: parsed.x, y: parsed.y }, type.speed),
 		};
 		if (type.voxel) {
 			sprites.push(
@@ -1177,8 +1437,10 @@ function parse_structures(
 	types: Map<string, ShapeType>,
 	seed: TheaterSeed,
 	art: INIClass,
+	player: string,
 ): MapSprite[] {
-	const placed: { name: string; x: number; y: number; type: ShapeType; scheme: string; blip: number; health: number }[] = [];
+	const house = player.toUpperCase();
+	const placed: { name: string; x: number; y: number; type: ShapeType; scheme: string; blip: number; health: number; owned: boolean }[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
 		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
@@ -1197,6 +1459,7 @@ function parse_structures(
 			scheme: type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house),
 			blip: house_blip(ini, rules, parsed.house),
 			health: parsed.health,
+			owned: parsed.house.toUpperCase() === house,
 		});
 	}
 	const sprites: MapSprite[] = [];
@@ -1224,47 +1487,69 @@ function parse_structures(
 					oy: loc.y,
 					scheme: item.scheme,
 					corner: true,
+					owned: item.owned,
 				}),
 			);
 			continue;
 		}
-		const files = object_files(item.type, seed);
-		if (files.length === 0) {
-			continue;
-		}
+		sprites.push(...structure_sprites(item.x, item.y, item.type, seed, art, item.scheme, item.blip, item.owned, item.health));
+	}
+	return sprites;
+}
+
+function structure_sprites(
+	x: number,
+	y: number,
+	type: ShapeType,
+	seed: TheaterSeed,
+	art: INIClass,
+	scheme: string,
+	blip: number,
+	owned: boolean,
+	health = 256,
+): MapSprite[] {
+	const sprites: MapSprite[] = [];
+	const files = object_files(type, seed);
+	if (files.length === 0) {
+		return sprites;
+	}
+	sprites.push(
+		make_sprite(x, y, files, type.terrain_palette ? "theater" : "unit", 3, {
+			extra_light: type.extra_light,
+			scheme,
+			selectable: true,
+			blip,
+			select: building_select(type),
+			occupy: type.occupy,
+			corner: true,
+			rtti: "building",
+			health_ratio: ini_health_ratio(health),
+			owned,
+			type_name: type.name,
+			gate: type.gate ? Make_Gate(type) : null,
+		}),
+	);
+	if (type.bib.length > 0) {
 		sprites.push(
-			make_sprite(item.x, item.y, files, item.type.terrain_palette ? "theater" : "unit", 3, {
-				extra_light: item.type.extra_light,
-				scheme: item.scheme,
-				selectable: true,
-				blip: item.blip,
-				select: building_select(item.type),
-				occupy: item.type.occupy,
+			make_sprite(x, y, anim_files(type.bib, seed, art), type.terrain_palette ? "theater" : "unit", 4, {
+				scheme,
 				corner: true,
-				rtti: "building",
-				health_ratio: ini_health_ratio(item.health),
+				owned,
 			}),
 		);
-		if (item.type.bib.length > 0) {
-			sprites.push(
-				make_sprite(item.x, item.y, anim_files(item.type.bib, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
-					scheme: item.scheme,
-					corner: true,
-				}),
-			);
-		}
-		for (const anim of item.type.active) {
-			sprites.push(
-				make_sprite(item.x, item.y, anim_files(anim.stem, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
-					ox: anim.x,
-					oy: anim.y,
-					scheme: item.scheme,
-					cast_shadow: false,
-					anim: create_anim(read_anim_type(art, anim.stem)),
-					corner: true,
-				}),
-			);
-		}
+	}
+	for (const anim of type.active) {
+		sprites.push(
+			make_sprite(x, y, anim_files(anim.stem, seed, art), type.terrain_palette ? "theater" : "unit", 4, {
+				ox: anim.x,
+				oy: anim.y,
+				scheme,
+				cast_shadow: false,
+				anim: create_anim(read_anim_type(art, anim.stem)),
+				corner: true,
+				owned,
+			}),
+		);
 	}
 	return sprites;
 }
@@ -1324,6 +1609,144 @@ function collect_lookers(
 	add("Units", units, false);
 	add("Aircraft", aircraft, false);
 	return lookers;
+}
+
+function owned_counts(ini: INIClass, player: string): Map<string, number> {
+	const house = player.toUpperCase();
+	const counts = new Map<string, number>();
+	const bump = (name: string): void => {
+		const key = name.toUpperCase();
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	};
+	const sections: [string, boolean][] = [
+		["Structures", false],
+		["Infantry", true],
+		["Units", false],
+		["Aircraft", false],
+	];
+	for (const [section, infantry] of sections) {
+		const count = ini.entry_count(section);
+		for (let i = 0; i < count; i++) {
+			const parsed = parse_placed(ini.get_string(section, ini.get_entry(section, i)), infantry);
+			if (parsed && parsed.house.toUpperCase() === house) {
+				bump(parsed.name);
+			}
+		}
+	}
+	return counts;
+}
+
+function has_any(counts: Map<string, number>, names: string[]): boolean {
+	return names.some((name) => (counts.get(name.toUpperCase()) ?? 0) > 0);
+}
+
+function owners_overlap(a: string[], b: string[]): boolean {
+	const have = new Set(a.map((name) => name.toUpperCase()));
+	return b.some((name) => have.has(name.toUpperCase()));
+}
+
+function Who_Can_Build_Me(
+	type: ShapeType,
+	kind: CameoKind,
+	owned: string[],
+	buildings: Map<string, ShapeType>,
+): boolean {
+	return owned.some((name) => {
+		const factory = buildings.get(name);
+		if (!factory || factory.to_build !== kind) {
+			return false;
+		}
+		return owners_overlap(factory.owners, type.owners);
+	});
+}
+
+function Can_Build(
+	type: ShapeType,
+	kind: CameoKind,
+	counts: Map<string, number>,
+	acts_like: string,
+	tech_level: number,
+	groups: Record<string, string[]>,
+	has_conyard: boolean,
+): number {
+	if (type.tech_level === -1 || type.tech_level > tech_level) {
+		return 0;
+	}
+	for (const need of type.prerequisite) {
+		const group = groups[need.toUpperCase()];
+		if (group) {
+			if (!has_any(counts, group)) {
+				return 0;
+			}
+			continue;
+		}
+		if ((counts.get(need.toUpperCase()) ?? 0) === 0) {
+			return 0;
+		}
+	}
+	if (kind === "BuildingType") {
+		if (type.owners.length === 0 || !type.owners.some((owner) => owner.toUpperCase() === acts_like)) {
+			return 0;
+		}
+		if (!has_conyard) {
+			return 0;
+		}
+	}
+	const have = counts.get(type.name.toUpperCase()) ?? 0;
+	if (type.build_limit <= 0) {
+		return have < Math.abs(type.build_limit) ? 1 : 0;
+	}
+	return have < type.build_limit ? 1 : -1;
+}
+
+function Update_Buildables(
+	owned: string[],
+	buildings: Map<string, ShapeType>,
+	tables: Record<CameoKind, ShapeType[]>,
+	counts: Map<string, number>,
+	acts_like: string,
+	tech_level: number,
+	groups: Record<string, string[]>,
+): SidebarStrips["Column"] {
+	const columns = Make_Strips();
+	const has_conyard = owned.some((name) => buildings.get(name)?.to_build === "BuildingType");
+	for (const name of owned) {
+		const factory = buildings.get(name);
+		const kind = factory?.to_build as CameoKind | undefined;
+		if (!kind) {
+			continue;
+		}
+		const table = tables[kind];
+		if (!table) {
+			continue;
+		}
+		for (let id = 0; id < table.length; id++) {
+			const type = table[id]!;
+			const allowed = Can_Build(type, kind, counts, acts_like, tech_level, groups, has_conyard);
+			if (allowed === 0) {
+				continue;
+			}
+			const column = columns[Which_Column(kind)]!;
+			Strip_Add(column, {
+				BuildableType: kind,
+				BuildableID: id,
+				name: type.name,
+				cameo: type.cameo || "XXICON",
+				label: type.label,
+				darken: allowed < 0 || !Who_Can_Build_Me(type, kind, owned, buildings),
+				category: Cameo_Category(kind),
+				sort: type.cameo_sort,
+				group: Cameo_Group(kind, type.wall, type.gate, type.sort_defense),
+				Factory: null,
+				queue: 0,
+			});
+		}
+	}
+	if (Options.SidebarSorting) {
+		Sort_Strip(columns[0]!);
+		Sort_Strip(columns[1]!);
+	}
+	return columns;
 }
 
 function collect_economy(
@@ -1428,7 +1851,8 @@ export async function load_map_artwork(
 	const overlay_packed = ini.get_uublock("OverlayPack");
 	const overlay_sprites = parse_overlay_pack(ini, overlays, seed, tiberiums);
 	const terrain_sprites = parse_terrain_section(ini, terrains, seed);
-	const structure_sprites = parse_structures(ini, rules_ini, buildings, seed, art_ini);
+	const player = ini.get_string("Basic", "Player", "GDI") || "GDI";
+	const structure_sprites = parse_structures(ini, rules_ini, buildings, seed, art_ini, player);
 	const infantry_sprites = parse_infantry(ini, rules_ini, infantry, seed);
 	const unit_sprites = parse_units(ini, rules_ini, "Units", units, seed, 2);
 	const aircraft_sprites = parse_units(ini, rules_ini, "Aircraft", aircraft, seed, 5);
@@ -1442,11 +1866,30 @@ export async function load_map_artwork(
 	];
 	const lighting = read_scenario_lighting(ini);
 	const lights = collect_lights(ini, buildings);
-	const player = ini.get_string("Basic", "Player", "GDI") || "GDI";
 	const credits = ini.get_int(player, "Credits", 0) * 100;
 	const lookers = collect_lookers(ini, player, buildings, infantry, units, aircraft);
 	const economy = collect_economy(ini, player, buildings);
 	const free_radar = ini.get_bool("Basic", "FreeRadar", false);
+	const counts = owned_counts(ini, player);
+	const acts_like = Acts_Like_From(ini, player, rules_ini);
+	const tech_level = ini.get_int(player, "TechLevel", 1);
+	const groups = {
+		POWER: csv(rules_ini.get_string("General", "PrerequisitePower", "")),
+		FACTORY: csv(rules_ini.get_string("General", "PrerequisiteFactory", "")),
+		BARRACKS: csv(rules_ini.get_string("General", "PrerequisiteBarracks", "")),
+		RADAR: csv(rules_ini.get_string("General", "PrerequisiteRadar", "")),
+		TECH: csv(rules_ini.get_string("General", "PrerequisiteTech", "")),
+		GDIFACTORY: csv(rules_ini.get_string("General", "PrerequisiteGDIFactory", "")),
+		NODFACTORY: csv(rules_ini.get_string("General", "PrerequisiteNodFactory", "")),
+	};
+	const tables: Record<CameoKind, ShapeType[]> = {
+		BuildingType: [...buildings.values()],
+		InfantryType: [...infantry.values()],
+		UnitType: [...units.values()],
+		AircraftType: [...aircraft.values()],
+	};
+	const owned_buildings = [...counts.keys()].filter((name) => buildings.has(name));
+	const columns = Update_Buildables(owned_buildings, buildings, tables, counts, acts_like, tech_level, groups);
 	const shroud_packed = await cc_retrieve(directory, "SHROUD.SHP");
 	const shroud = shroud_packed ? read_shp(shroud_packed) : null;
 	const select_packed = await cc_retrieve(directory, "SELECT.SHP");
@@ -1511,7 +1954,7 @@ export async function load_map_artwork(
 		}
 	}
 
-	ready.sort((a, b) => a.x + a.y - (b.x + b.y) || a.layer - b.layer);
+	ready.sort(compare_sprites);
 	log(
 		`Map objects: ${overlay_sprites.length} overlays, ${terrain_sprites.length} terrain, ${structure_sprites.length} structures, ${infantry_sprites.length} infantry, ${unit_sprites.length} units, ${aircraft_sprites.length} aircraft; ${ready.length} sprites, ${shapes.size} SHP files, ${voxels_ready.size} VXL models.`,
 	);
@@ -1529,6 +1972,33 @@ export async function load_map_artwork(
 	}
 	log(
 		`Power ${economy.output}/${economy.drain}; radar ${economy.has_radar || free_radar ? "available" : "off"}.`,
+	);
+	const cameo_palette = await load_palette(directory, "CAMEO.PAL", log);
+	const cameo_shapes = new Map<string, ShapeSet>();
+	const cameo_names = new Set<string>(["XXICON"]);
+	for (const strip of columns) {
+		for (const entry of strip.Buildables) {
+			cameo_names.add(entry.cameo);
+		}
+	}
+	for (const name of cameo_names) {
+		const packed = await cc_retrieve(directory, `${name}.SHP`);
+		const shape = packed ? read_shp(packed) : null;
+		if (shape) {
+			cameo_shapes.set(name, shape);
+		}
+	}
+	const darken_packed = await cc_retrieve(directory, "DARKEN.SHP");
+	const up_packed = await cc_retrieve(directory, "R-UP.SHP");
+	const down_packed = await cc_retrieve(directory, "R-DN.SHP");
+	const clock_packed = await cc_retrieve(directory, "GCLOCK2.SHP");
+	const scheme = house_scheme(ini, rules_ini, player);
+	const blip = house_blip(ini, rules_ini, player);
+	const build_speed = rules_ini.get_float("General", "BuildSpeed", 1);
+	const max_queue = rules_ini.get_int("General", "MaximumQueuedObjects", 5);
+	const cliff_back = rules_ini.get_int("General", "CliffBackImpassability", 0);
+	log(
+		`Sidebar ${columns[0]!.Buildables.length} buildings, ${columns[1]!.Buildables.length} units; ActsLike ${acts_like}, TechLevel ${tech_level}.`,
 	);
 	return {
 		sprites: ready,
@@ -1550,5 +2020,1012 @@ export async function load_map_artwork(
 		power_drain: economy.drain,
 		has_radar: economy.has_radar,
 		free_radar,
+		sidebar: {
+			Column: columns,
+			palette: cameo_palette,
+			shapes: cameo_shapes,
+			darken: darken_packed ? read_shp(darken_packed) : null,
+			up: up_packed ? read_shp(up_packed) : null,
+			down: down_packed ? read_shp(down_packed) : null,
+			clock: clock_packed ? read_shp(clock_packed) : null,
+		},
+		production: {
+			player,
+			acts_like,
+			tech_level,
+			groups,
+			buildings,
+			infantry,
+			units,
+			tables,
+			counts,
+			seed,
+			scheme,
+			blip,
+			build_speed,
+			factories: new Map(),
+			pending: null,
+			art: art_ini,
+			max_queue,
+			cliff_back,
+		},
+		terrain: new Map(),
 	};
+}
+
+export function Factory_AI(artwork: MapArtwork): FactoryObject[] {
+	const ready: FactoryObject[] = [];
+	for (const factory of artwork.production.factories.values()) {
+		factory.AI(artwork.credits, (cost) => {
+			artwork.credits -= cost;
+		});
+		if (factory.Has_Completed() && factory.Object && factory.Object.kind !== "BuildingType" && !factory.IsExiting) {
+			factory.IsExiting = true;
+			ready.push(factory.Object);
+		}
+	}
+	Refresh_Queue(artwork);
+	return ready;
+}
+
+export function Gate_AI(artwork: MapArtwork): void {
+	for (const sprite of artwork.sprites) {
+		if (sprite.gate) {
+			Tick_Gate(artwork, sprite);
+		}
+	}
+}
+
+export async function Place_Completed_Foot(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	object: FactoryObject,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<void> {
+	const entry = find_buildable(artwork, object);
+	if (!entry) {
+		const stalled = artwork.production.factories.get(object.kind);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return;
+	}
+	await Exit_Object(directory, artwork, entry, play, cells, shroud);
+}
+
+export async function Cameo_Left(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	entry: BuildType,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<void> {
+	const factory = entry.Factory as FactoryClass | null;
+	if (factory?.IsExiting) {
+		return;
+	}
+	if (factory && !factory.Is_Building()) {
+		if (factory.Has_Completed()) {
+			if (entry.BuildableType === "BuildingType") {
+				await Manual_Place(directory, artwork, entry);
+			} else {
+				await Exit_Object(directory, artwork, entry, play, cells, shroud);
+			}
+			return;
+		}
+		Begin_Production(artwork, entry);
+		return;
+	}
+	const existing = artwork.production.factories.get(entry.BuildableType);
+	if (existing && (existing.Is_Building() || existing.Has_Production_Target()) && entry.BuildableType === "BuildingType") {
+		return;
+	}
+	Begin_Production(artwork, entry);
+}
+
+export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shroud: ShroudMap | null): void {
+	let resorted = false;
+	for (const sprite of artwork.sprites) {
+		const foot = sprite.foot;
+		if (!foot) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		const before = Coord_Cell(foot.lx, foot.ly);
+		const dest = foot.dest;
+		const can_step: PathEnter = (from, to) => foot_step(artwork, sprite, from, to, dest, play, cells, false);
+		const can_path: PathEnter = (from, to) => foot_step(artwork, sprite, from, to, dest, play, cells, true);
+		const moved = Movement_AI(foot, can_step, (cell) => Try_Open_Gate(artwork, cell), can_path);
+		if (!moved) {
+			if (type && sprite.rtti === "infantry" && !foot.moving) {
+				sprite.frame = infantry_ready_frame(type, sprite.dir);
+			}
+			continue;
+		}
+		const placed = Apply_Coord(foot);
+		sprite.x = placed.x;
+		sprite.y = placed.y;
+		sprite.ox = placed.ox;
+		sprite.oy = placed.oy;
+		if (foot.head) {
+			const facing = Direction_Facing({ x: foot.lx, y: foot.ly }, foot.head);
+			sprite.dir = Facing_Dir256(facing);
+		}
+		if (type) {
+			if (sprite.rtti === "infantry") {
+				sprite.frame = foot.moving
+					? infantry_walk_frame(type, sprite.dir, foot.stage)
+					: infantry_ready_frame(type, sprite.dir);
+			} else if (!sprite.voxel) {
+				sprite.frame = unit_stand_frame(type, sprite.dir);
+			}
+		}
+		if (placed.x !== before.x || placed.y !== before.y) {
+			resorted = true;
+			Look(artwork, sprite, shroud);
+		}
+	}
+	if (resorted) {
+		Sort_Sprites(artwork);
+	}
+}
+
+export function Assign_Move(artwork: MapArtwork, sprite: MapSprite, cell: Point2D, play: Rect, cells: Set<string>): boolean {
+	if (!sprite.foot) {
+		return false;
+	}
+	let dest = cell;
+	if (!can_enter_foot(artwork, sprite, dest, play, cells, false)) {
+		const nearby = nearby_enter(artwork, sprite, dest, play, cells);
+		if (!nearby) {
+			return false;
+		}
+		dest = nearby;
+	}
+	Assign_Destination(sprite.foot, dest);
+	Reset_Action_Line_Timer();
+	return true;
+}
+
+export function Can_Move_To(artwork: MapArtwork, sprite: MapSprite, cell: Point2D, play: Rect, cells: Set<string>): boolean {
+	if (can_enter_foot(artwork, sprite, cell, play, cells, false)) {
+		return true;
+	}
+	return nearby_enter(artwork, sprite, cell, play, cells) !== null;
+}
+
+async function Exit_Object(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	entry: BuildType,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<boolean> {
+	const type = type_from_entry(artwork, entry);
+	if (!type || (entry.BuildableType !== "InfantryType" && entry.BuildableType !== "UnitType")) {
+		const stalled = artwork.production.factories.get(entry.BuildableType);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return false;
+	}
+	const factory_sprite = who_can_build_me_sprite(artwork, entry.BuildableType);
+	if (!factory_sprite) {
+		const stalled = artwork.production.factories.get(entry.BuildableType);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return false;
+	}
+	const factory_type = artwork.production.buildings.get(factory_sprite.type_name.toUpperCase());
+	if (!factory_type) {
+		const stalled = artwork.production.factories.get(entry.BuildableType);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return false;
+	}
+	const exitcell = Find_Exit_Cell(artwork, factory_sprite, factory_type, play, cells);
+	if (!exitcell) {
+		const stalled = artwork.production.factories.get(entry.BuildableType);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return false;
+	}
+	const size = occupy_size(factory_type.occupy);
+	let to = { ...exitcell };
+	if (to.x >= factory_sprite.x + size.w) {
+		to.x -= 1;
+	} else if (to.x < factory_sprite.x) {
+		to.x += 1;
+	}
+	if (to.y >= factory_sprite.y + size.h) {
+		to.y -= 1;
+	} else if (to.y < factory_sprite.y) {
+		to.y += 1;
+	}
+	let spawn = Cell_Center(to);
+	if (factory_type.gdi_barracks && exitcell.x === factory_sprite.x + 1 && exitcell.y === factory_sprite.y + 2) {
+		spawn = { x: spawn.x + factory_type.exit_coord.x, y: spawn.y + factory_type.exit_coord.y };
+	}
+	if (factory_type.nod_barracks && exitcell.x === factory_sprite.x + 2 && exitcell.y === factory_sprite.y + 2) {
+		spawn = { x: spawn.x + factory_type.exit_coord.x, y: spawn.y + factory_type.exit_coord.y };
+	}
+	const spawn_cell = Coord_Cell(spawn.x, spawn.y);
+	const files = object_files(type, artwork.production.seed);
+	const rtti = entry.BuildableType === "InfantryType" ? "infantry" : "unit";
+	const sprite = make_sprite(spawn_cell.x, spawn_cell.y, files, type.terrain_palette ? "theater" : "unit", rtti === "infantry" ? 2 : 2, {
+		scheme: artwork.production.scheme,
+		selectable: true,
+		blip: artwork.production.blip,
+		select: rtti === "infantry" ? { kind: "shape", frame: 2 } : unit_select(type, false),
+		rtti,
+		owned: true,
+		type_name: type.name,
+		dir: Facing_Dir256(Direction_Facing(spawn, Cell_Center(exitcell))),
+		frame: rtti === "infantry" ? infantry_ready_frame(type, 0) : unit_stand_frame(type, 0),
+		foot: Make_Foot(spawn_cell, type.speed),
+	});
+	sprite.foot!.lx = spawn.x;
+	sprite.foot!.ly = spawn.y;
+	const placed = Apply_Coord(sprite.foot!);
+	sprite.x = placed.x;
+	sprite.y = placed.y;
+	sprite.ox = placed.ox;
+	sprite.oy = placed.oy;
+	const ready = await bind_sprite_shapes(directory, artwork, [sprite]);
+	if (ready.length === 0) {
+		const stalled = artwork.production.factories.get(entry.BuildableType);
+		if (stalled) {
+			stalled.IsExiting = false;
+		}
+		return false;
+	}
+	const born = ready[0]!;
+	Assign_Destination(born.foot!, exitcell);
+	artwork.sprites.push(born);
+	Sort_Sprites(artwork);
+	const key = type.name.toUpperCase();
+	artwork.production.counts.set(key, (artwork.production.counts.get(key) ?? 0) + 1);
+	if (type.sight > 0) {
+		artwork.lookers.push({ x: born.x, y: born.y, sight: type.sight });
+		shroud?.Sight_From(born.x, born.y, type.sight);
+	}
+	const factory = artwork.production.factories.get(entry.BuildableType);
+	if (factory) {
+		factory.Completed();
+		Unlink_Factory(artwork, factory);
+		if (factory.QueuedObjects.length === 0) {
+			artwork.production.factories.delete(entry.BuildableType);
+		} else {
+			Resume_Queue(artwork, factory, entry.BuildableType);
+		}
+	}
+	Refresh_Queue(artwork);
+	await Recalc_Buildables(directory, artwork);
+	return true;
+}
+
+function who_can_build_me_sprite(artwork: MapArtwork, kind: CameoKind): MapSprite | null {
+	for (const sprite of artwork.sprites) {
+		if (sprite.rtti !== "building" || !sprite.owned) {
+			continue;
+		}
+		const type = artwork.production.buildings.get(sprite.type_name.toUpperCase());
+		if (type?.to_build === kind) {
+			return sprite;
+		}
+	}
+	return null;
+}
+
+function Find_Exit_Cell(
+	artwork: MapArtwork,
+	factory: MapSprite,
+	type: ShapeType,
+	play: Rect,
+	cells: Set<string>,
+): Point2D | null {
+	const try_cell = (cell: Point2D): boolean =>
+		In_Radar_Cell(cell.x, cell.y, play) && cells.has(`${cell.x},${cell.y}`) && !building_at(artwork, cell.x, cell.y);
+	if (type.gdi_barracks) {
+		const cell = { x: factory.x + 1, y: factory.y + 2 };
+		if (try_cell(cell)) {
+			return cell;
+		}
+	}
+	if (type.nod_barracks) {
+		const cell = { x: factory.x + 2, y: factory.y + 2 };
+		if (try_cell(cell)) {
+			return cell;
+		}
+	}
+	const size = occupy_size(type.occupy);
+	for (let x1 = -1; x1 <= size.w; x1++) {
+		const north = { x: factory.x + x1, y: factory.y - 1 };
+		if (try_cell(north)) {
+			return north;
+		}
+		const south = { x: factory.x + x1, y: factory.y + size.h };
+		if (try_cell(south)) {
+			return south;
+		}
+	}
+	for (let y1 = -1; y1 <= size.h; y1++) {
+		const west = { x: factory.x - 1, y: factory.y + y1 };
+		if (try_cell(west)) {
+			return west;
+		}
+		const east = { x: factory.x + size.w, y: factory.y + y1 };
+		if (try_cell(east)) {
+			return east;
+		}
+	}
+	return null;
+}
+
+function building_at(artwork: MapArtwork, x: number, y: number): boolean {
+	return artwork.sprites.some((sprite) => {
+		if (sprite.wall && sprite.x === x && sprite.y === y) {
+			return true;
+		}
+		if (sprite.rtti !== "building" || !occupies(sprite, sprite.occupy, x, y)) {
+			return false;
+		}
+		if (sprite.gate && Is_Gate_Open(sprite)) {
+			return false;
+		}
+		return true;
+	});
+}
+
+function can_enter_foot(
+	artwork: MapArtwork,
+	mover: MapSprite,
+	cell: Point2D,
+	play: Rect,
+	cells: Set<string>,
+	allow_gate: boolean,
+): boolean {
+	if (!In_Radar_Cell(cell.x, cell.y, play) || !cells.has(`${cell.x},${cell.y}`)) {
+		return false;
+	}
+	if (is_cliff_back(artwork, cell)) {
+		return false;
+	}
+	return !artwork.sprites.some((sprite) => {
+		if (sprite === mover) {
+			return false;
+		}
+		if (sprite.wall && sprite.x === cell.x && sprite.y === cell.y) {
+			return true;
+		}
+		if (sprite.rtti !== "building" || !occupies(sprite, sprite.occupy, cell.x, cell.y)) {
+			return false;
+		}
+		if (sprite.gate) {
+			if (Is_Gate_Open(sprite)) {
+				return false;
+			}
+			if (allow_gate && sprite.owned) {
+				return false;
+			}
+		}
+		return true;
+	});
+}
+
+const CLIFF_BACK_OFFSETS: readonly [number, number][] = [
+	[0, -1],
+	[-1, 0],
+	[2, 2],
+	[1, 1],
+	[-1, 1],
+	[1, -1],
+];
+
+function cell_height(artwork: MapArtwork, x: number, y: number): number {
+	return artwork.terrain.get(`${x},${y}`)?.height ?? 0;
+}
+
+function is_cliff_back(artwork: MapArtwork, cell: Point2D): boolean {
+	if (artwork.production.cliff_back !== 2) {
+		return false;
+	}
+	const limit = cell_height(artwork, cell.x, cell.y) + 4;
+	return CLIFF_BACK_OFFSETS.some(([dx, dy]) => limit <= cell_height(artwork, cell.x + dx, cell.y + dy));
+}
+
+function foot_step(
+	artwork: MapArtwork,
+	mover: MapSprite,
+	from: Point2D,
+	to: Point2D,
+	dest: Point2D | null,
+	play: Rect,
+	cells: Set<string>,
+	allow_gate: boolean,
+): boolean {
+	if (!Can_Reach(from, to, artwork.terrain)) {
+		return false;
+	}
+	if (dest && to.x === dest.x && to.y === dest.y) {
+		if (!In_Radar_Cell(to.x, to.y, play) || !cells.has(`${to.x},${to.y}`)) {
+			return false;
+		}
+		return !is_cliff_back(artwork, to);
+	}
+	return can_enter_foot(artwork, mover, to, play, cells, allow_gate);
+}
+
+function nearby_enter(
+	artwork: MapArtwork,
+	mover: MapSprite,
+	cell: Point2D,
+	play: Rect,
+	cells: Set<string>,
+): Point2D | null {
+	for (let rad = 1; rad <= 3; rad++) {
+		for (let y = -rad; y <= rad; y++) {
+			for (let x = -rad; x <= rad; x++) {
+				const next = { x: cell.x + x, y: cell.y + y };
+				if (can_enter_foot(artwork, mover, next, play, cells, false)) {
+					return next;
+				}
+			}
+		}
+	}
+	return null;
+}
+
+function type_for_sprite(artwork: MapArtwork, sprite: MapSprite): ShapeType | null {
+	const name = sprite.type_name.toUpperCase();
+	if (sprite.rtti === "building") {
+		return artwork.production.buildings.get(name) ?? null;
+	}
+	if (sprite.rtti === "infantry") {
+		return artwork.production.infantry.get(name) ?? null;
+	}
+	if (sprite.rtti === "unit") {
+		return artwork.production.units.get(name) ?? null;
+	}
+	return null;
+}
+
+export function Cameo_Right(artwork: MapArtwork, entry: BuildType): void {
+	artwork.production.pending = null;
+	const slot = entry.Factory as FactoryClass | null;
+	if (slot) {
+		if (!slot.Is_Building()) {
+			artwork.credits += slot.Abandon();
+			if (slot.QueuedObjects.length === 0) {
+				artwork.production.factories.delete(entry.BuildableType);
+				Unlink_Factory(artwork, slot);
+			} else {
+				Unlink_Factory(artwork, slot);
+				Resume_Queue(artwork, slot, entry.BuildableType);
+			}
+			Refresh_Queue(artwork);
+			return;
+		}
+		slot.Suspend();
+		return;
+	}
+	const factory = artwork.production.factories.get(entry.BuildableType);
+	if (factory && factory.Is_Queued(entry.name)) {
+		factory.Remove_From_Queue(entry.name);
+		Refresh_Queue(artwork);
+	}
+}
+
+export function Can_Place_Building(
+	artwork: MapArtwork,
+	cell: Point2D,
+	play: Rect,
+	shroud: ShroudMap | null,
+	cells: Set<string>,
+): boolean {
+	const pending = artwork.production.pending;
+	if (!pending) {
+		return false;
+	}
+	for (const offset of pending.occupy) {
+		const x = cell.x + offset.x;
+		const y = cell.y + offset.y;
+		if (!In_Radar_Cell(x, y, play) || !cells.has(`${x},${y}`)) {
+			return false;
+		}
+		if (shroud && !shroud.IsMapped(x, y)) {
+			return false;
+		}
+		if (cell_blocked(artwork, x, y)) {
+			return false;
+		}
+	}
+	return Passes_Proximity(artwork, cell, pending.occupy, pending.adjacent);
+}
+
+export async function Place_Pending(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	cell: Point2D,
+	play: Rect,
+	shroud: ShroudMap | null,
+	cells: Set<string>,
+): Promise<boolean> {
+	const pending = artwork.production.pending;
+	if (!pending || !Can_Place_Building(artwork, cell, play, shroud, cells)) {
+		return false;
+	}
+	const factory = artwork.production.factories.get(pending.kind);
+	if (!factory || !factory.Has_Completed() || factory.Object?.name !== pending.name) {
+		return false;
+	}
+	const placed = pending.sprites.map((sprite) => ({ ...sprite, x: cell.x, y: cell.y }));
+	const ready = await bind_sprite_shapes(directory, artwork, placed);
+	if (ready.length === 0) {
+		return false;
+	}
+	artwork.sprites.push(...ready);
+	Sort_Sprites(artwork);
+	const type = artwork.production.buildings.get(pending.name);
+	if (type) {
+		artwork.power_output += type.power;
+		artwork.power_drain += type.drain;
+		if (type.radar) {
+			artwork.has_radar = true;
+		}
+		if (type.sight > 0) {
+			artwork.lookers.push({ x: cell.x, y: cell.y, sight: type.sight });
+			shroud?.Sight_From(cell.x, cell.y, type.sight);
+		}
+		if (type.light_intensity !== 0) {
+			const at = building_light_coord(cell.x, cell.y, type.occupy);
+			artwork.lights.push({
+				x: at.x,
+				y: at.y,
+				visibility: type.light_visibility,
+				intensity: type.light_intensity,
+				red: type.light_red,
+				green: type.light_green,
+				blue: type.light_blue,
+			});
+		}
+	}
+	const key = pending.name.toUpperCase();
+	artwork.production.counts.set(key, (artwork.production.counts.get(key) ?? 0) + 1);
+	factory.Completed();
+	artwork.production.factories.delete(pending.kind);
+	Unlink_Factory(artwork, factory);
+	artwork.production.pending = null;
+	await Recalc_Buildables(directory, artwork);
+	return true;
+}
+
+function Begin_Production(artwork: MapArtwork, entry: BuildType): boolean {
+	const type = type_from_entry(artwork, entry);
+	if (!type) {
+		return false;
+	}
+	const owned = [...artwork.production.counts.keys()].filter((name) => artwork.production.buildings.has(name));
+	if (!Who_Can_Build_Me(type, entry.BuildableType, owned, artwork.production.buildings)) {
+		return false;
+	}
+	let factory = artwork.production.factories.get(entry.BuildableType);
+	if (!factory) {
+		factory = new FactoryClass();
+		factory.max_queue = artwork.production.max_queue;
+		artwork.production.factories.set(entry.BuildableType, factory);
+	}
+	if (factory.Is_Building() && entry.BuildableType === "BuildingType") {
+		return false;
+	}
+	const same =
+		factory.IsSuspended &&
+		factory.Object !== null &&
+		factory.Object.kind === entry.BuildableType &&
+		factory.Object.id === entry.BuildableID;
+	const current = factory.Object;
+	if (!same) {
+		if (Is_Build_Limited(artwork, type, factory) && (factory.Is_Building() || factory.Has_Production_Target() || factory.IsSuspended)) {
+			return false;
+		}
+		if (!factory.Set({
+			kind: entry.BuildableType,
+			id: entry.BuildableID,
+			name: type.name,
+			cost: type.cost,
+			time: Time_To_Build(type.cost, artwork.production.build_speed, artwork.power_output, artwork.power_drain),
+		})) {
+			return false;
+		}
+	}
+	if (factory.Object === current && factory.QueuedObjects.length > 0 && !same) {
+		Refresh_Queue(artwork);
+		return true;
+	}
+	factory.Start();
+	Factory_Link(artwork, factory, entry.BuildableType, entry.BuildableID);
+	Refresh_Queue(artwork);
+	return true;
+}
+
+async function Manual_Place(directory: GameDirectory, artwork: MapArtwork, entry: BuildType): Promise<void> {
+	if (entry.BuildableType !== "BuildingType" || artwork.production.pending) {
+		return;
+	}
+	const type = artwork.production.buildings.get(entry.name.toUpperCase());
+	if (!type) {
+		return;
+	}
+	const sprites = structure_sprites(
+		0,
+		0,
+		type,
+		artwork.production.seed,
+		artwork.production.art,
+		artwork.production.scheme,
+		artwork.production.blip,
+		true,
+	);
+	const ready = await bind_sprite_shapes(directory, artwork, sprites);
+	if (ready.length === 0) {
+		return;
+	}
+	artwork.production.pending = {
+		kind: entry.BuildableType,
+		name: type.name,
+		occupy: type.occupy,
+		adjacent: type.adjacent,
+		sprites: ready,
+	};
+}
+
+async function Recalc_Buildables(directory: GameDirectory, artwork: MapArtwork): Promise<void> {
+	const tops = artwork.sidebar.Column.map((strip) => strip.TopIndex);
+	const owned = [...artwork.production.counts.keys()].filter((name) => artwork.production.buildings.has(name));
+	const columns = Update_Buildables(
+		owned,
+		artwork.production.buildings,
+		artwork.production.tables,
+		artwork.production.counts,
+		artwork.production.acts_like,
+		artwork.production.tech_level,
+		artwork.production.groups,
+	);
+	for (let i = 0; i < columns.length; i++) {
+		const strip = columns[i]!;
+		strip.TopIndex = Math.max(0, Math.min(tops[i] ?? 0, strip.Buildables.length - 1));
+	}
+	artwork.sidebar.Column = columns;
+	for (const [kind, factory] of artwork.production.factories) {
+		if (factory.Object) {
+			Factory_Link(artwork, factory, kind, factory.Object.id);
+		}
+	}
+	Refresh_Queue(artwork);
+	const names = new Set<string>(["XXICON"]);
+	for (const strip of columns) {
+		for (const entry of strip.Buildables) {
+			names.add(entry.cameo);
+		}
+	}
+	for (const name of names) {
+		if (artwork.sidebar.shapes.has(name)) {
+			continue;
+		}
+		const packed = await cc_retrieve(directory, `${name}.SHP`);
+		const shape = packed ? read_shp(packed) : null;
+		if (shape) {
+			artwork.sidebar.shapes.set(name, shape);
+		}
+	}
+}
+
+function Factory_Link(artwork: MapArtwork, factory: FactoryClass, kind: CameoKind, id: number): void {
+	for (const strip of artwork.sidebar.Column) {
+		for (const entry of strip.Buildables) {
+			if (entry.BuildableType === kind && entry.BuildableID === id) {
+				entry.Factory = factory;
+			}
+		}
+	}
+}
+
+function Unlink_Factory(artwork: MapArtwork, factory: FactoryClass): void {
+	for (const strip of artwork.sidebar.Column) {
+		for (const entry of strip.Buildables) {
+			if (entry.Factory === factory) {
+				entry.Factory = null;
+			}
+		}
+	}
+}
+
+function Refresh_Queue(artwork: MapArtwork): void {
+	for (const strip of artwork.sidebar.Column) {
+		for (const entry of strip.Buildables) {
+			const factory = artwork.production.factories.get(entry.BuildableType);
+			entry.queue = factory ? factory.Total(entry.name) : 0;
+		}
+	}
+}
+
+function Resume_Queue(artwork: MapArtwork, factory: FactoryClass, kind: CameoKind): void {
+	if (factory.Object || factory.Is_Building()) {
+		return;
+	}
+	const next = factory.Take_Queue();
+	if (!next) {
+		return;
+	}
+	factory.Set(next, true);
+	factory.Start();
+	Factory_Link(artwork, factory, kind, next.id);
+}
+
+function Is_Build_Limited(artwork: MapArtwork, type: ShapeType, factory: FactoryClass): boolean {
+	if (type.build_limit >= 0x7fffffff) {
+		return false;
+	}
+	const have = (artwork.production.counts.get(type.name.toUpperCase()) ?? 0) + factory.Total(type.name);
+	if (type.build_limit <= 0) {
+		return have >= Math.abs(type.build_limit);
+	}
+	return have >= type.build_limit;
+}
+
+function find_buildable(artwork: MapArtwork, object: FactoryObject): BuildType | null {
+	for (const strip of artwork.sidebar.Column) {
+		for (const entry of strip.Buildables) {
+			if (entry.BuildableType === object.kind && entry.BuildableID === object.id) {
+				return entry;
+			}
+		}
+	}
+	return {
+		BuildableType: object.kind,
+		BuildableID: object.id,
+		name: object.name,
+		cameo: "XXICON",
+		label: object.name,
+		darken: false,
+		category: 0,
+		sort: 0,
+		group: 0,
+		Factory: artwork.production.factories.get(object.kind) ?? null,
+		queue: 0,
+	};
+}
+
+function Is_Gate_Open(sprite: MapSprite): boolean {
+	const gate = sprite.gate;
+	if (!gate) {
+		return true;
+	}
+	return gate.status === GATE_OPEN && !gate.door_active && gate.door_up;
+}
+
+function Try_Open_Gate(artwork: MapArtwork, cell: Point2D): boolean {
+	const sprite = gate_at(artwork, cell);
+	if (!sprite || !sprite.owned) {
+		return false;
+	}
+	if (Is_Gate_Open(sprite)) {
+		return false;
+	}
+	Open_Gate(sprite);
+	return true;
+}
+
+function gate_at(artwork: MapArtwork, cell: Point2D): MapSprite | null {
+	for (const sprite of artwork.sprites) {
+		if (sprite.gate && occupies(sprite, sprite.occupy, cell.x, cell.y)) {
+			return sprite;
+		}
+	}
+	return null;
+}
+
+function Open_Gate(sprite: MapSprite): void {
+	const gate = sprite.gate;
+	if (!gate) {
+		return;
+	}
+	if (gate.status === GATE_OPENING || gate.status === GATE_OPEN) {
+		return;
+	}
+	if (gate.status === GATE_CLOSING && gate.door_active) {
+		gate.door_up = true;
+		gate.door_count = Math.max(0, gate.deploy - gate.door_count);
+		gate.status = GATE_OPENING;
+		return;
+	}
+	gate.status = GATE_START_OPENING;
+}
+
+function Tick_Gate(artwork: MapArtwork, sprite: MapSprite): void {
+	const gate = sprite.gate;
+	if (!gate) {
+		return;
+	}
+	if (gate.door_active) {
+		gate.door_count += 1;
+		if (gate.door_count >= gate.deploy) {
+			gate.door_active = false;
+			gate.door_count = gate.deploy;
+		}
+	}
+	switch (gate.status) {
+		case GATE_START_OPENING:
+			if (!gate.door_active && gate.door_up) {
+				gate.hold = gate.close_delay;
+				gate.status = GATE_OPEN;
+				break;
+			}
+			if (!gate.door_active) {
+				gate.door_active = true;
+				gate.door_count = 0;
+				gate.door_up = true;
+			}
+			gate.status = GATE_OPENING;
+			gate.hold = gate.close_delay;
+			break;
+		case GATE_START_CLOSING:
+			gate.door_active = true;
+			gate.door_count = 0;
+			gate.door_up = false;
+			gate.status = GATE_CLOSING;
+			break;
+		case GATE_OPEN:
+			if (gate_blocked(artwork, sprite)) {
+				gate.hold = gate.close_delay;
+			} else if (gate.hold > 0) {
+				gate.hold -= 1;
+			} else {
+				gate.status = GATE_START_CLOSING;
+			}
+			break;
+		case GATE_OPENING:
+			if (!gate.door_active && gate.door_up) {
+				gate.status = GATE_OPEN;
+				gate.hold = gate.close_delay;
+			}
+			break;
+		case GATE_CLOSING:
+			if (!gate.door_active && !gate.door_up) {
+				gate.status = GATE_CLOSED;
+			}
+			break;
+		default:
+			break;
+	}
+	sprite.frame = gate_frame(gate);
+}
+
+function gate_percent(gate: GateState): number {
+	if (gate.deploy <= 0) {
+		return gate.door_up ? 1 : 0;
+	}
+	if (!gate.door_active) {
+		return gate.door_up ? 1 : 0;
+	}
+	return Math.min(1, gate.door_count / gate.deploy);
+}
+
+function gate_frame(gate: GateState): number {
+	if (gate.status === GATE_CLOSED && !gate.door_active) {
+		return 0;
+	}
+	let shapenum = (gate_percent(gate) * gate.stages) | 0;
+	if (!gate.door_up) {
+		shapenum = gate.stages - shapenum;
+	}
+	if (!gate.door_active && gate.door_up) {
+		shapenum = gate.stages - 1;
+	}
+	if (!gate.door_active && !gate.door_up) {
+		shapenum = 0;
+	}
+	if (shapenum >= gate.stages) {
+		shapenum = gate.stages - 1;
+	}
+	if (shapenum < 0) {
+		shapenum = 0;
+	}
+	return shapenum;
+}
+
+function gate_blocked(artwork: MapArtwork, gate: MapSprite): boolean {
+	return artwork.sprites.some((sprite) => {
+		if (!sprite.foot || sprite === gate) {
+			return false;
+		}
+		return occupies(gate, gate.occupy, sprite.x, sprite.y);
+	});
+}
+
+function type_from_entry(artwork: MapArtwork, entry: BuildType): ShapeType | null {
+	const table = artwork.production.tables[entry.BuildableType];
+	return table?.[entry.BuildableID] ?? null;
+}
+
+function In_Radar_Cell(x: number, y: number, play: Rect): boolean {
+	const w = play.width;
+	const h = play.height;
+	return x + y > w && x - y < w && y - x < w && x + y <= w + 2 * h;
+}
+
+function cell_blocked(artwork: MapArtwork, x: number, y: number): boolean {
+	return artwork.sprites.some((sprite) => {
+		if (!sprite.rtti) {
+			return false;
+		}
+		return occupies(sprite, sprite.occupy, x, y);
+	});
+}
+
+function Passes_Proximity(
+	artwork: MapArtwork,
+	origin: Point2D,
+	occupy: { x: number; y: number }[],
+	adjacent: number,
+): boolean {
+	const size = occupy_size(occupy);
+	const adj = adjacent + 1;
+	const xmin = origin.x - adj;
+	const ymin = origin.y - adj;
+	const xmax = xmin + 2 * adj + size.w;
+	const ymax = ymin + 2 * adj + size.h;
+	for (let x = xmin; x < xmax; x++) {
+		for (let y = ymin; y < ymax; y++) {
+			if (x >= origin.x && x < origin.x + size.w && y >= origin.y && y < origin.y + size.h) {
+				continue;
+			}
+			for (const sprite of artwork.sprites) {
+				if (!sprite.owned || sprite.rtti !== "building") {
+					continue;
+				}
+				if (occupies(sprite, sprite.occupy, x, y)) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+async function bind_sprite_shapes(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	sprites: MapSprite[],
+): Promise<MapSprite[]> {
+	const cache = new Map<string, ShapeSet | null>();
+	for (const [key, shape] of artwork.shapes) {
+		cache.set(key, shape);
+	}
+	const ready: MapSprite[] = [];
+	for (const sprite of sprites) {
+		const key = await fetch_shape(directory, cache, sprite.names);
+		if (!key) {
+			continue;
+		}
+		const shape = cache.get(key);
+		if (!shape) {
+			continue;
+		}
+		artwork.shapes.set(key, shape);
+		if (sprite.anim) {
+			bind_anim_shape(sprite.anim, shape.frames.length);
+			ready.push({ ...sprite, file: key, frame: sprite.anim.start + sprite.anim.stage });
+		} else {
+			ready.push({ ...sprite, file: key });
+		}
+	}
+	return ready;
 }
