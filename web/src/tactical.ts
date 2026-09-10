@@ -29,15 +29,18 @@ import {
 	type CellLight,
 	type ScenarioLighting,
 } from "./light";
-import { MouseClass, MOUSE_N, MOUSE_NO_N, MOUSE_NORMAL } from "./mouse";
+import { MouseClass, MOUSE_CAN_SELECT, MOUSE_N, MOUSE_NO_N, MOUSE_NORMAL } from "./mouse";
 import { Anim_Logic, type MapArtwork, type MapSprite } from "./objects";
 import { Options } from "./options";
 import { canvas_mouse, present, type CanvasLabel } from "./present";
+import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
 import { blit_shape, blit_shape_shadow } from "./shp";
+import { Draw_Shroud, ShroudMap } from "./shroud";
 import { blit_voxel } from "./voxlib";
 import {
 	draw_hud,
 	load_sidebar,
+	over_tactical,
 	SCREEN_H,
 	SCREEN_W,
 	TAC_H,
@@ -59,6 +62,39 @@ function In_Radar(x: number, y: number, play: Rect): boolean {
 
 const VIEW_W = TAC_W;
 const VIEW_H = TAC_H;
+const CELL_LEPTON = 256;
+const CELL_PIXEL_W = 24;
+const CELL_PIXEL_H = 48;
+const CELL_LEPTON_DIAG = Math.sqrt(CELL_LEPTON * CELL_LEPTON * 2);
+const LEVEL_LEPTON_H = Math.trunc((Math.tan(Math.PI / 2 - Math.PI / 3) * CELL_LEPTON_DIAG) / 2);
+const Z_PIXELS_PER_LEPTON = Math.sin(Math.PI / 3) * (ISO_TILE_PIXEL_W / CELL_LEPTON_DIAG);
+const BRIDGE_CELL_HEIGHT = 4;
+const WHITE = 15;
+const PIXEL_TO_COORD_X = Math.trunc(CELL_LEPTON / CELL_PIXEL_W) + 0.6667;
+const PIXEL_TO_COORD_Y = Math.trunc(CELL_LEPTON / CELL_PIXEL_H) + 0.3333302;
+const RAMP_CONTROL: { x: number; y: number; base: number; max: number; extra: number }[] = [
+	{ x: 1, y: 0, base: 0, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 0, y: 1, base: 0, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: 0, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 0, y: -1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: 1, base: -LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: 1, base: 0, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: -1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: -1, base: 0, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: 1, base: 0, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: 1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: -1, base: LEVEL_LEPTON_H + LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: -1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: 1, base: 0, max: LEVEL_LEPTON_H + LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: 1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H + LEVEL_LEPTON_H, extra: 0 },
+	{ x: -1, y: -1, base: LEVEL_LEPTON_H + LEVEL_LEPTON_H, max: LEVEL_LEPTON_H + LEVEL_LEPTON_H, extra: 0 },
+	{ x: 1, y: -1, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H + LEVEL_LEPTON_H, extra: 0 },
+	{ x: 0, y: 0, base: 0, max: LEVEL_LEPTON_H * 0.5, extra: LEVEL_LEPTON_H * 0.5 },
+	{ x: 0, y: 0, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H * 0.5, extra: LEVEL_LEPTON_H * -0.5 },
+	{ x: 0, y: 0, base: 0, max: LEVEL_LEPTON_H * 0.5, extra: LEVEL_LEPTON_H * 0.5 },
+	{ x: 0, y: 0, base: LEVEL_LEPTON_H, max: LEVEL_LEPTON_H * 0.5, extra: LEVEL_LEPTON_H * -0.5 },
+];
+type Coord = { x: number; y: number; z: number };
 const FACING_NONE = -1;
 const SCROLL_STEPS_PER_SECOND = 60;
 const MAX_SCROLL_STEPS_PER_POLL = 4;
@@ -81,7 +117,7 @@ const SCROLL_NEWDIR = [
 	5, 4, 3,
 ];
 
-function cell_pixel(cell: IsoCell): Point2D {
+function cell_pixel(cell: { x: number; y: number; height: number }): Point2D {
 	return {
 		x: (cell.x - cell.y) * (ISO_TILE_PIXEL_W >> 1) - (ISO_TILE_PIXEL_W >> 1),
 		y: (cell.x + cell.y) * (ISO_TILE_PIXEL_H >> 1) - cell.height * LEVEL_PIXEL_H,
@@ -209,12 +245,19 @@ function draw_view(
 	artwork: MapArtwork | null,
 	cell_lights: Map<string, CellLight>,
 	palettes: Map<string, Uint16Array>,
+	shroud: ShroudMap | null,
+	selected: MapSprite | null,
 ): DSurface {
 	const origin = view_origin(camera);
 	const frame = new DSurface(VIEW_W, VIEW_H);
 	const heights = new Map<string, number>();
+	const ramps = new Map<string, number>();
 	for (const cell of cells) {
 		heights.set(`${cell.x},${cell.y}`, cell.height);
+		ramps.set(`${cell.x},${cell.y}`, fetch_subtile(tiles, cell.tile, cell.subtile)?.ramp ?? 0);
+		if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
+			continue;
+		}
 		const pixel = cell_pixel(cell);
 		const dx = pixel.x - origin.x;
 		const dy = pixel.y - origin.y;
@@ -242,24 +285,49 @@ function draw_view(
 			blit_iso_tile(frame, dx, dy, tile, palette);
 		}
 	}
-	if (!artwork) {
-		return frame;
-	}
-	const draw_sprite = (sprite: (typeof artwork.sprites)[number], shadow: boolean): void => {
-		const height = heights.get(`${sprite.x},${sprite.y}`) ?? 0;
-		const pixel = cell_pixel({ x: sprite.x, y: sprite.y, height, tile: 0, subtile: 0 });
-		const dx = pixel.x + (ISO_TILE_PIXEL_W >> 1) + sprite.ox - origin.x;
-		const dy = pixel.y + (ISO_TILE_PIXEL_H >> 1) + sprite.oy - origin.y;
-		if (dx < -128 || dy < -160 || dx >= VIEW_W + 128 || dy >= VIEW_H + 160) {
-			return;
-		}
-		if (sprite.voxel) {
-			const model = artwork.voxels.get(sprite.voxel);
-			if (!model) {
+	if (artwork) {
+		const color = Convert_Pixel(artwork.unit_palette, WHITE);
+		const draw_sprite = (sprite: (typeof artwork.sprites)[number], shadow: boolean): void => {
+			if (shroud && !shroud.IsMapped(sprite.x, sprite.y)) {
+				return;
+			}
+			const draw = sprite_draw_point(sprite, origin, heights);
+			const dx = draw.x;
+			const dy = draw.y;
+			if (dx < -128 || dy < -160 || dx >= VIEW_W + 128 || dy >= VIEW_H + 160) {
+				return;
+			}
+			if (sprite.voxel) {
+				const model = artwork.voxels.get(sprite.voxel);
+				if (!model) {
+					return;
+				}
+				if (shadow) {
+					blit_voxel(frame, artwork.unit_palette, model, sprite.dir, dx, dy, true);
+					return;
+				}
+				const light = cell_lights.get(`${sprite.x},${sprite.y}`) ?? {
+					brightness: NORMAL_LIGHT,
+					tile: NORMAL_LIGHT,
+					red: NORMAL_LIGHT,
+					green: NORMAL_LIGHT,
+					blue: NORMAL_LIGHT,
+				};
+				const palette = sprite_palette(artwork, sprite, light, palettes);
+				blit_voxel(frame, palette, model, sprite.dir, dx, dy, false);
+				return;
+			}
+			const shape = artwork.shapes.get(sprite.file);
+			if (!shape) {
 				return;
 			}
 			if (shadow) {
-				blit_voxel(frame, artwork.unit_palette, model, sprite.dir, dx, dy, true);
+				if (sprite.cast_shadow && !sprite.anim?.dead) {
+					blit_shape_shadow(frame, shape, sprite.frame, dx, dy, true);
+				}
+				return;
+			}
+			if (sprite.anim?.dead) {
 				return;
 			}
 			const light = cell_lights.get(`${sprite.x},${sprite.y}`) ?? {
@@ -270,39 +338,409 @@ function draw_view(
 				blue: NORMAL_LIGHT,
 			};
 			const palette = sprite_palette(artwork, sprite, light, palettes);
-			blit_voxel(frame, palette, model, sprite.dir, dx, dy, false);
-			return;
-		}
-		const shape = artwork.shapes.get(sprite.file);
-		if (!shape) {
-			return;
-		}
-		if (shadow) {
-			if (sprite.cast_shadow && !sprite.anim?.dead) {
-				blit_shape_shadow(frame, shape, sprite.frame, dx, dy, true);
-			}
-			return;
-		}
-		if (sprite.anim?.dead) {
-			return;
-		}
-		const light = cell_lights.get(`${sprite.x},${sprite.y}`) ?? {
-			brightness: NORMAL_LIGHT,
-			tile: NORMAL_LIGHT,
-			red: NORMAL_LIGHT,
-			green: NORMAL_LIGHT,
-			blue: NORMAL_LIGHT,
+			blit_shape(frame, palette, shape, sprite.frame, dx, dy, true);
 		};
-		const palette = sprite_palette(artwork, sprite, light, palettes);
-		blit_shape(frame, palette, shape, sprite.frame, dx, dy, true);
-	};
-	for (const sprite of artwork.sprites) {
-		draw_sprite(sprite, true);
+		for (const sprite of artwork.sprites) {
+			draw_sprite(sprite, true);
+		}
+		if (selected) {
+			draw_selection_pre(frame, origin, selected, heights, ramps, color);
+		}
+		for (const sprite of artwork.sprites) {
+			draw_sprite(sprite, false);
+		}
+		if (selected) {
+			draw_selection_post(frame, origin, selected, artwork, heights, ramps, color);
+		}
 	}
-	for (const sprite of artwork.sprites) {
-		draw_sprite(sprite, false);
+	if (shroud) {
+		Draw_Shroud(frame, origin, cells, cell_pixel, shroud, artwork?.shroud ?? null);
 	}
 	return frame;
+}
+
+function sprite_center(
+	sprite: MapSprite,
+	origin: Point2D,
+	heights: Map<string, number>,
+): Point2D {
+	const height = heights.get(`${sprite.x},${sprite.y}`) ?? 0;
+	const pixel = cell_pixel({ x: sprite.x, y: sprite.y, height });
+	return {
+		x: pixel.x + (ISO_TILE_PIXEL_W >> 1) + sprite.ox - origin.x,
+		y: pixel.y + (ISO_TILE_PIXEL_H >> 1) + sprite.oy - origin.y,
+	};
+}
+
+function sprite_draw_point(
+	sprite: MapSprite,
+	origin: Point2D,
+	heights: Map<string, number>,
+): Point2D {
+	const center = sprite_center(sprite, origin, heights);
+	if (!sprite.corner) {
+		return center;
+	}
+	return { x: center.x, y: center.y - (ISO_TILE_PIXEL_H >> 1) };
+}
+
+function Z_Lepton_To_Pixel(z: number): number {
+	let fudge = 0;
+	if (z >= CELL_LEPTON * 3 + CELL_LEPTON / 2 + 40) {
+		fudge = 1;
+	}
+	return Math.trunc(z * Z_PIXELS_PER_LEPTON + fudge + 0.5);
+}
+
+function Coord_To_Pixel(coord: Coord, origin: Point2D): Point2D {
+	const iso_x = Math.trunc((coord.x * ISO_TILE_PIXEL_W) / 2) + Math.trunc((coord.y * ISO_TILE_PIXEL_W) / -2);
+	const iso_y = Math.trunc((coord.x * ISO_TILE_PIXEL_H) / 2) + Math.trunc((coord.y * ISO_TILE_PIXEL_H) / 2);
+	return {
+		x: Math.trunc(iso_x / CELL_LEPTON) - origin.x,
+		y: Math.trunc(iso_y / CELL_LEPTON) - Z_Lepton_To_Pixel(coord.z) - origin.y,
+	};
+}
+
+function Convert_Pixel(palette: Uint16Array, pixel: number): number {
+	return palette[pixel & 255] ?? 0;
+}
+
+function Pixel_To_Lepton(pixel: Point2D): Point2D {
+	return {
+		x: Math.trunc(PIXEL_TO_COORD_Y * pixel.x + PIXEL_TO_COORD_X * pixel.y),
+		y: Math.trunc(-PIXEL_TO_COORD_Y * pixel.x + PIXEL_TO_COORD_X * pixel.y),
+	};
+}
+
+function Get_Height(point: Point2D, heights: Map<string, number>, ramps: Map<string, number>): number {
+	const cellx = Math.trunc(point.x / CELL_LEPTON);
+	const celly = Math.trunc(point.y / CELL_LEPTON);
+	const level = heights.get(`${cellx},${celly}`) ?? 0;
+	let height = Math.trunc(LEVEL_LEPTON_H * level + 0.5);
+	const ramp = ramps.get(`${cellx},${celly}`) ?? 0;
+	if (ramp <= 0 || ramp > RAMP_CONTROL.length) {
+		return height;
+	}
+	const control = RAMP_CONTROL[ramp - 1]!;
+	const slope = LEVEL_LEPTON_H / CELL_LEPTON;
+	let rampheight =
+		(point.x & (CELL_LEPTON - 1)) * control.x * slope +
+		(point.y & (CELL_LEPTON - 1)) * control.y * slope +
+		control.base +
+		control.extra;
+	if (rampheight < 0) {
+		rampheight = 0;
+	}
+	if (rampheight > control.max) {
+		rampheight = control.max;
+	}
+	return height + Math.trunc(rampheight);
+}
+
+function Pixel_To_Cell(point: Point2D, origin: Point2D, heights: Map<string, number>, bridges: Set<string>): Point2D {
+	const span = 12 * (ISO_TILE_PIXEL_H >> 1);
+	let scany = span + point.y;
+	for (let count = 0; count < span; count++) {
+		const lepton = Pixel_To_Lepton({ x: point.x + origin.x, y: scany + origin.y });
+		const cell = { x: Math.trunc(lepton.x / CELL_LEPTON), y: Math.trunc(lepton.y / CELL_LEPTON) };
+		const height = heights.get(`${cell.x},${cell.y}`) ?? 0;
+		let celly = scany - height * (ISO_TILE_PIXEL_H >> 1);
+		if (bridges.has(`${cell.x},${cell.y}`)) {
+			celly -= BRIDGE_CELL_HEIGHT * (ISO_TILE_PIXEL_H >> 1);
+		}
+		if (celly <= point.y) {
+			return cell;
+		}
+		scany -= 1;
+	}
+	const fallback = Pixel_To_Lepton({ x: point.x + origin.x, y: point.y + origin.y });
+	return { x: Math.trunc(fallback.x / CELL_LEPTON), y: Math.trunc(fallback.y / CELL_LEPTON) };
+}
+
+function Draw_3D_Line(dest: DSurface, origin: Point2D, a: Coord, b: Coord, color: number): void {
+	const start = Coord_To_Pixel(a, origin);
+	const end = Coord_To_Pixel(b, origin);
+	dest.Draw_Depth_Shaded_Line(start, end, color, 14 - Z_Lepton_To_Pixel(a.z), 14 - Z_Lepton_To_Pixel(b.z), false);
+}
+
+function lerp_quarter(a: Coord, b: Coord): Coord {
+	return {
+		x: Math.trunc((a.x + a.x + a.x + b.x) / 4),
+		y: Math.trunc((a.y + a.y + a.y + b.y) / 4),
+		z: Math.trunc((a.z + a.z + a.z + b.z) / 4),
+	};
+}
+
+function Draw_Double_Selection_Bracket(dest: DSurface, origin: Point2D, a: Coord, b: Coord, color: number): void {
+	Draw_3D_Line(dest, origin, a, lerp_quarter(a, b), color);
+	Draw_3D_Line(dest, origin, b, lerp_quarter(b, a), color);
+}
+
+function Draw_Single_Selection_Bracket(dest: DSurface, origin: Point2D, a: Coord, b: Coord, color: number): void {
+	Draw_3D_Line(dest, origin, a, lerp_quarter(a, b), color);
+}
+
+function select_center(sprite: MapSprite, heights: Map<string, number>, ramps: Map<string, number>): Coord {
+	const box = sprite.select?.kind === "box" ? sprite.select : null;
+	const x = sprite.x * CELL_LEPTON + (box ? Math.trunc(box.lx / 2) : CELL_LEPTON / 2);
+	const y = sprite.y * CELL_LEPTON + (box ? Math.trunc(box.ly / 2) : CELL_LEPTON / 2);
+	return { x, y, z: Get_Height({ x, y }, heights, ramps) };
+}
+
+function add_coord(center: Coord, x: number, y: number, z: number): Coord {
+	return { x: center.x + x, y: center.y + y, z: center.z + z };
+}
+
+function draw_selection_pre(
+	dest: DSurface,
+	origin: Point2D,
+	sprite: MapSprite,
+	heights: Map<string, number>,
+	ramps: Map<string, number>,
+	color: number,
+): void {
+	const box = sprite.select;
+	if (!box || box.kind !== "box" || !box.pre) {
+		return;
+	}
+	const hx = Math.trunc(box.lx / 2);
+	const hy = Math.trunc(box.ly / 2);
+	const center = select_center(sprite, heights, ramps);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, -hy, 0), add_coord(center, -hx, -hy, box.lz), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, -hy, 0), add_coord(center, hx, -hy, 0), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, -hy, 0), add_coord(center, -hx, hy, 0), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, -hy, box.lz), add_coord(center, -hx, hy, box.lz), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, -hy, box.lz), add_coord(center, hx, -hy, box.lz), color);
+}
+
+function draw_selection_box_post(
+	dest: DSurface,
+	origin: Point2D,
+	sprite: MapSprite,
+	heights: Map<string, number>,
+	ramps: Map<string, number>,
+	color: number,
+): void {
+	const box = sprite.select;
+	if (!box || box.kind !== "box") {
+		return;
+	}
+	const hx = Math.trunc(box.lx / 2);
+	const hy = Math.trunc(box.ly / 2);
+	const center = select_center(sprite, heights, ramps);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, hx, hy, 0), add_coord(center, -hx, hy, 0), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, hx, hy, 0), add_coord(center, hx, -hy, 0), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, -hx, hy, 0), add_coord(center, -hx, hy, box.lz), color);
+	Draw_Double_Selection_Bracket(dest, origin, add_coord(center, hx, -hy, 0), add_coord(center, hx, -hy, box.lz), color);
+	Draw_Single_Selection_Bracket(dest, origin, add_coord(center, hx, hy, 0), add_coord(center, hx, hy, box.lz), color);
+	Draw_Single_Selection_Bracket(dest, origin, add_coord(center, hx, -hy, box.lz), add_coord(center, hx, hy, box.lz), color);
+	Draw_Single_Selection_Bracket(dest, origin, add_coord(center, -hx, hy, box.lz), add_coord(center, hx, hy, box.lz), color);
+}
+
+function Draw_Health_Bar(
+	dest: DSurface,
+	origin: Point2D,
+	sprite: MapSprite,
+	artwork: MapArtwork,
+	heights: Map<string, number>,
+	ramps: Map<string, number>,
+): void {
+	const box = sprite.select?.kind === "box" ? sprite.select : null;
+	const xpoint =
+		sprite.rtti === "building" || box
+			? Coord_To_Pixel(select_center(sprite, heights, ramps), origin)
+			: sprite_center(sprite, origin, heights);
+	if (sprite.rtti === "building" || box) {
+		if (!box || !artwork.pips) {
+			return;
+		}
+		const halfx = Math.trunc(box.lx / 2);
+		const halfy = Math.trunc(box.ly / 2);
+		const p0 = Coord_To_Pixel({ x: -(box.lx - halfx), y: box.ly - halfy, z: box.lz }, { x: 0, y: 0 });
+		const p1 = Coord_To_Pixel({ x: -(box.lx - halfx), y: -(box.ly - halfy), z: box.lz }, { x: 0, y: 0 });
+		const barlen = Math.trunc((p0.y - p1.y) / 2);
+		if (barlen <= 0) {
+			return;
+		}
+		let n = Math.trunc(sprite.health_ratio * barlen);
+		if (n <= 1) {
+			n = 1;
+		}
+		if (n >= barlen) {
+			n = barlen;
+		}
+		let condcolor = 1;
+		if (sprite.health_ratio <= artwork.condition_yellow) {
+			condcolor = 2;
+		}
+		if (sprite.health_ratio <= artwork.condition_red) {
+			condcolor = 4;
+		}
+		const ybase = 2 - 2 * barlen;
+		let yoff = 0;
+		let xoff = 0;
+		for (let index = 0; index < n; index++) {
+			blit_shape(
+				dest,
+				artwork.unit_palette,
+				artwork.pips,
+				condcolor,
+				xpoint.x + p0.x + 4 * barlen + 3 - xoff,
+				xpoint.y + p0.y + ybase + 2 - yoff,
+				true,
+			);
+			xoff += 4;
+			yoff -= 2;
+		}
+		yoff = -2 * n;
+		xoff = 4 * n;
+		for (let index = n; index < barlen; index++) {
+			blit_shape(
+				dest,
+				artwork.unit_palette,
+				artwork.pips,
+				0,
+				xpoint.x + p0.x + 4 * barlen + 3 - xoff,
+				xpoint.y + p0.y + ybase + 2 - yoff,
+				true,
+			);
+			xoff += 4;
+			yoff -= 2;
+		}
+		return;
+	}
+	const sel = sprite.select;
+	if (sel?.kind === "shape" && artwork.select) {
+		blit_shape(dest, artwork.unit_palette, artwork.select, sel.frame, xpoint.x, xpoint.y, true);
+	}
+	if (!artwork.pips) {
+		return;
+	}
+	const infantry = sprite.rtti === "infantry";
+	const offset = infantry ? { x: -5, y: -24 } : { x: -15, y: -25 };
+	const health_bar_count = infantry ? 8 : 17;
+	let n = Math.trunc(sprite.health_ratio * health_bar_count);
+	if (n <= 1) {
+		n = 1;
+	}
+	if (n >= health_bar_count) {
+		n = health_bar_count;
+	}
+	let shapenum = 9;
+	if (sprite.health_ratio <= artwork.condition_yellow) {
+		shapenum = 10;
+	}
+	if (sprite.health_ratio <= artwork.condition_red) {
+		shapenum = 11;
+	}
+	for (let index = 0; index < n; index++) {
+		blit_shape(
+			dest,
+			artwork.unit_palette,
+			artwork.pips,
+			shapenum,
+			xpoint.x + offset.x + 2 * index,
+			xpoint.y + offset.y,
+			true,
+		);
+	}
+}
+
+function draw_selection_post(
+	dest: DSurface,
+	origin: Point2D,
+	sprite: MapSprite,
+	artwork: MapArtwork,
+	heights: Map<string, number>,
+	ramps: Map<string, number>,
+	color: number,
+): void {
+	const sel = sprite.select;
+	if (!sel) {
+		return;
+	}
+	if (sel.kind === "box") {
+		draw_selection_box_post(dest, origin, sprite, heights, ramps, color);
+	}
+	Draw_Health_Bar(dest, origin, sprite, artwork, heights, ramps);
+}
+
+function occupies_cell(sprite: MapSprite, cell: Point2D): boolean {
+	return sprite.occupy.some((offset) => sprite.x + offset.x === cell.x && sprite.y + offset.y === cell.y);
+}
+
+function bridge_cells(artwork: MapArtwork): Set<string> {
+	const cells = new Set<string>();
+	for (const sprite of artwork.sprites) {
+		if (sprite.bridge) {
+			cells.add(`${sprite.x},${sprite.y}`);
+		}
+	}
+	return cells;
+}
+
+function Cell_Occupier(artwork: MapArtwork, cell: Point2D, shroud: ShroudMap | null): MapSprite | null {
+	let occupier: MapSprite | null = null;
+	for (const sprite of artwork.sprites) {
+		if (!sprite.selectable) {
+			continue;
+		}
+		if (shroud && !shroud.IsMapped(sprite.x, sprite.y)) {
+			continue;
+		}
+		if (sprite.rtti === "building") {
+			if (occupies_cell(sprite, cell) && !occupier) {
+				occupier = sprite;
+			}
+			continue;
+		}
+		if (sprite.x === cell.x && sprite.y === cell.y) {
+			occupier = sprite;
+		}
+	}
+	return occupier;
+}
+
+function hover_sprite(
+	artwork: MapArtwork,
+	mouse: Point2D,
+	camera: Point2D,
+	heights: Map<string, number>,
+	bridges: Set<string>,
+	shroud: ShroudMap | null,
+): MapSprite | null {
+	if (!over_tactical(mouse.x, mouse.y)) {
+		return null;
+	}
+	const origin = view_origin(camera);
+	const mx = mouse.x - TAC_X;
+	const my = mouse.y - TAC_Y;
+	let best: MapSprite | null = null;
+	let best_dist = 200;
+	for (const sprite of artwork.sprites) {
+		if (!sprite.selectable) {
+			continue;
+		}
+		if (shroud && !shroud.IsMapped(sprite.x, sprite.y)) {
+			continue;
+		}
+		const click = sprite_center(sprite, origin, heights);
+		const dx = click.x - mx;
+		const dy = click.y - my;
+		const dist = dx * dx + dy * dy * 0.5;
+		if (dist < best_dist) {
+			best_dist = dist;
+			best = sprite;
+		}
+	}
+	if (best) {
+		return best;
+	}
+	const cell = Pixel_To_Cell({ x: mx, y: my }, origin, heights, bridges);
+	if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
+		return null;
+	}
+	return Cell_Occupier(artwork, cell, shroud);
 }
 
 function composite_view(
@@ -313,11 +751,25 @@ function composite_view(
 	cell_lights: Map<string, CellLight>,
 	palettes: Map<string, Uint16Array>,
 	hud: SidebarArt,
+	shroud: ShroudMap | null,
+	selected: MapSprite | null,
+	radar: RadarMap | null,
 ): { frame: DSurface; labels: CanvasLabel[] } {
-	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes);
+	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected);
 	const frame = new DSurface(SCREEN_W, SCREEN_H);
 	frame.blit_from(TAC_X, TAC_Y, tactical);
-	const labels = draw_hud(frame, hud, artwork?.credits ?? 0);
+	const radar_on = radar?.exists === true;
+	const labels = draw_hud(
+		frame,
+		hud,
+		artwork?.credits ?? 0,
+		artwork?.power_output ?? 0,
+		artwork?.power_drain ?? 0,
+		radar_on,
+	);
+	if (radar && radar_on) {
+		Render_Radar(frame, radar, cells, tiles, shroud, artwork?.sprites ?? [], camera);
+	}
 	return { frame, labels };
 }
 
@@ -521,6 +973,7 @@ export async function Show_Tactical(
 	const lighting = artwork?.lighting ?? DAYLIGHT;
 	const palettes = new Map<string, Uint16Array>();
 	const cell_lights = gather_cell_lights(draw_list, lighting, artwork);
+	const shroud = artwork ? new ShroudMap(play, artwork.lookers) : null;
 	const hud = await load_sidebar(directory, log);
 	const mouse = new MouseClass();
 	await mouse.One_Time(directory);
@@ -528,6 +981,21 @@ export async function Show_Tactical(
 	log(
 		`Tactical map ${draw_list.length} cells, theater ${theater || "?"}, ${name}. Edge-scroll or arrows to pan; Escape returns to the menu.`,
 	);
+	if (shroud) {
+		log(`Shroud: ${shroud.mapped_count} cells from ${artwork?.lookers.length ?? 0} lookers.`);
+	}
+	const radar_exists =
+		!!artwork && (artwork.free_radar || artwork.has_radar) && artwork.power_output >= artwork.power_drain;
+	const radar = Compute_Radar_Image(draw_list, radar_exists);
+	const heights = new Map<string, number>();
+	for (const cell of draw_list) {
+		heights.set(`${cell.x},${cell.y}`, cell.height);
+	}
+	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
+	let selected: MapSprite | null = null;
+	if (radar) {
+		log(`Radar ${radar_exists ? "on" : "off"} ${radar.blit_w}x${radar.blit_h}.`);
+	}
 
 	let camera = clamp_to_tactical_rect(starting_camera(draw_list, play, local, home), play, local);
 	const scroll: ScrollState = {
@@ -547,7 +1015,7 @@ export async function Show_Tactical(
 	let raf = 0;
 
 	const paint = (): void => {
-		const view = composite_view(tiles, draw_list, camera, artwork, cell_lights, palettes, hud);
+		const view = composite_view(tiles, draw_list, camera, artwork, cell_lights, palettes, hud, shroud, selected, radar);
 		if (mouse.MouseShapes) {
 			mouse.Draw_Mouse(view.frame, hud.palette);
 		}
@@ -598,8 +1066,24 @@ export async function Show_Tactical(
 		const on_down = (event: MouseEvent): void => {
 			event.preventDefault();
 			on_move(event);
-			if (event.button === 0) {
-				scroll.mouse_down = true;
+			if (event.button !== 0) {
+				return;
+			}
+			if (radar && over_radar(mouse.Point.x, mouse.Point.y, radar)) {
+				const cell = Radar_Pixel_To_Cell(radar, mouse.Point);
+				if (cell) {
+					const found = draw_list.find((item) => item.x === cell.x && item.y === cell.y);
+					camera = clamp_to_tactical_rect(
+						cell_pixel(found ?? { x: cell.x, y: cell.y, height: 0 }),
+						play,
+						local,
+					);
+				}
+				return;
+			}
+			scroll.mouse_down = true;
+			if (artwork) {
+				selected = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
 			}
 		};
 		const on_up = (): void => {
@@ -640,6 +1124,17 @@ export async function Show_Tactical(
 				system_tick();
 			}
 			camera = scroll_edge(mouse, camera, play, local, scroll, now);
+			if (
+				artwork &&
+				(mouse.CurrentMouseShape === MOUSE_NORMAL || mouse.CurrentMouseShape === MOUSE_CAN_SELECT)
+			) {
+				if (over_radar(mouse.Point.x, mouse.Point.y, radar)) {
+					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+				} else {
+					const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+					mouse.Override_Mouse_Shape(hover ? MOUSE_CAN_SELECT : MOUSE_NORMAL, false);
+				}
+			}
 			paint();
 			raf = requestAnimationFrame(tick);
 		};

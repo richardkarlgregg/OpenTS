@@ -58,7 +58,27 @@ game.
   `MouseControl` `FrameRate` on the 60 Hz system timer. Campaign frames
   advance every `Options.GameSpeed` system ticks (default 3). Building
   `ActiveAnim` uses ART `Rate`/`Start`/`End`/`LoopCount` through
-  `StageClass::Graphic_Logic`. Edge scroll is `ScrollClass::Scroll_Edge`
+  `StageClass::Graphic_Logic`. Unexplored cells stay under `SHROUD.SHP` from
+  `Tactical::Cell_Shadow` after player techno `Look()` / `MapClass::Sight_From`
+  (`Sight=` in RULES); the SHP indices scale the 565 frame instead of an
+  `AlphaBuffer`. The power bar is `PowerClass` pips from `POWERP.SHP`, scaled
+  from player `Power=` / drain. Radar plots mapped terrain and house-color
+  blips in the `RADAR.SHP` pane when a `Radar=yes` building is powered (or
+  `FreeRadar=yes`); clicking it jumps `TacticalCoord`. Clicking a mapped
+  techno selects it (`MOUSE_CAN_SELECT`) through `Get_Selectable_Object`
+  (near the object's position, then `Cell_Occupier`: last non-building whose
+  origin is that cell, else the building occupying it). Buildings blit from
+  `Render_Coord` (origin-cell north-west corner) and draw `TechnoClass` 3D
+  lepton brackets with `Draw_Depth_Shaded_Line` in `Convert_Pixel(WHITE)`
+  (unit palette index 15). Terrain Z for those brackets is `Get_Height` at
+  the centre lepton (cell height plus TMP `RampType`). Infantry and other
+  units blit `SELECT.SHP` frames 2 and 3, or 6 and 7 when the scenario INI
+  veteran token is set, then `PIPS.SHP` health pips. Selection is drawn
+  before the shroud pass so the shroud darkens it the way `SHAPE_ALPHA`
+  would. `Pixel_To_Lepton` uses `PixelToCoordMatrix`. Bridge overlay cells
+  lift `Pixel_To_Cell` by `BRIDGE_CELL_HEIGHT`. Cloak, fog of war, limpet
+  `SELECT.SHP` frames, and tile depth-buffer writes are not ported. Edge
+  scroll is `ScrollClass::Scroll_Edge`
   (arrow cursors `MOUSE_N`…`MOUSE_NW`, barred when `Scroll_Dir` cannot
   move). The camera is `TacticalCoord` (view center); `TacPixel` subtracts
   half the tactical rect before blit, and `Tactical_Position_Limits` clamp

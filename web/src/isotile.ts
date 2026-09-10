@@ -33,6 +33,7 @@ export type IsoSubtile = {
 	colors: TilePreviewColors;
 	indices: Uint8Array;
 	extra: IsoExtraImage | null;
+	ramp: number;
 };
 
 export type TheaterTiles = {
@@ -78,7 +79,7 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	for (let i = 0; i < count; i++) {
 		const offset = view.getInt32(16 + i * 4, true);
 		if (offset <= 0 || offset + RECORD_HIGH + 2 >= bytes.length) {
-			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null });
+			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0 });
 			continue;
 		}
 		const colors: TilePreviewColors = {
@@ -112,7 +113,8 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 				};
 			}
 		}
-		tiles.push({ colors, indices, extra });
+		const ramp = bytes[offset + 42] ?? 0;
+		tiles.push({ colors, indices, extra, ramp });
 	}
 	return tiles;
 }

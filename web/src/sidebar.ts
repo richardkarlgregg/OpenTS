@@ -13,7 +13,9 @@
 import { cc_retrieve } from "./ccfile";
 import type { GameDirectory } from "./files";
 import { Fetch_String, TXT_TAB_BUTTON_CONTROLS } from "./language";
+import { Desired_Levels, POWER_PIP_EMPTY, POWER_PIP_GREEN, POWER_PIP_HEIGHT, POWER_PIP_RED, POWER_PIP_YELLOW, POWER_X, POWER_Y, type PowerPips } from "./power";
 import type { CanvasLabel } from "./present";
+import { MAX_RADAR_FRAMES } from "./radar";
 import { blit_shape, read_palette, read_shp, type ShapeSet } from "./shp";
 import { DSurface } from "./surface";
 
@@ -47,6 +49,7 @@ export type SidebarArt = {
 	sell: ShapeSet | null;
 	power: ShapeSet | null;
 	waypoint: ShapeSet | null;
+	pips: ShapeSet | null;
 };
 
 async function fetch_shp(directory: GameDirectory, names: string[]): Promise<ShapeSet | null> {
@@ -76,13 +79,14 @@ export async function load_sidebar(directory: GameDirectory, log: (line: string)
 	const sell = await fetch_shp(directory, ["SELL.SHP"]);
 	const power = await fetch_shp(directory, ["POWER.SHP"]);
 	const waypoint = await fetch_shp(directory, ["WAYP.SHP"]);
+	const pips = await fetch_shp(directory, ["POWERP.SHP"]);
 	if (!tabs || !side1) {
 		log("Sidebar SHPs missing; drawing an empty strip.");
 	}
-	return { palette, tabs, side1, side2, side3, addon, radar, repair, sell, power, waypoint };
+	return { palette, tabs, side1, side2, side3, addon, radar, repair, sell, power, waypoint, pips };
 }
 
-function max_visible(hud: SidebarArt): number {
+export function Max_Visible(hud: SidebarArt): number {
 	if (!hud.side1 || !hud.side2 || !hud.side3) {
 		return 4;
 	}
@@ -98,7 +102,14 @@ function blit(dest: DSurface, palette: Uint16Array, shape: ShapeSet | null, fram
 	blit_shape(dest, palette, shape, frame, x, y, false);
 }
 
-export function draw_hud(dest: DSurface, hud: SidebarArt, credits: number): CanvasLabel[] {
+export function draw_hud(
+	dest: DSurface,
+	hud: SidebarArt,
+	credits: number,
+	output = 0,
+	drain = 0,
+	radar_on = false,
+): CanvasLabel[] {
 	const side_x = TAC_W;
 	if (hud.tabs) {
 		const tab_w = Math.max(1, hud.tabs.width);
@@ -108,12 +119,15 @@ export function draw_hud(dest: DSurface, hud: SidebarArt, credits: number): Canv
 		blit(dest, hud.palette, hud.tabs, 0, 0, 0);
 		blit(dest, hud.palette, hud.tabs, 2, side_x, 0);
 	}
-	blit(dest, hud.palette, hud.radar, 0, side_x, RADAR_Y);
+	const radar_frame = radar_on
+		? Math.min(MAX_RADAR_FRAMES, Math.max(0, (hud.radar?.frames.length ?? 1) - 1))
+		: 0;
+	blit(dest, hud.palette, hud.radar, radar_frame, side_x, RADAR_Y);
 
 	let y = SIDE_Y;
 	blit(dest, hud.palette, hud.side1, 0, side_x, y);
 	y += hud.side1?.height ?? 0;
-	const visible = max_visible(hud);
+	const visible = Max_Visible(hud);
 	for (let i = 0; i < visible; i++) {
 		blit(dest, hud.palette, hud.side2, 0, side_x, y);
 		y += hud.side2?.height ?? 0;
@@ -127,6 +141,9 @@ export function draw_hud(dest: DSurface, hud: SidebarArt, credits: number): Canv
 	for (let i = 0; i < buttons.length; i++) {
 		blit(dest, hud.palette, buttons[i]!, 0, side_x + BUTTON_ONE_X + i * BUTTON_SPACING, button_y);
 	}
+
+	const pips = Desired_Levels(output, drain, visible);
+	draw_power(dest, hud, pips);
 
 	return [
 		{
@@ -146,6 +163,26 @@ export function draw_hud(dest: DSurface, hud: SidebarArt, credits: number): Canv
 			selected: true,
 		},
 	];
+}
+
+function draw_power(dest: DSurface, hud: SidebarArt, pips: PowerPips): void {
+	if (!hud.pips) {
+		return;
+	}
+	const x = TAC_W + POWER_X;
+	let y = SIDE_Y + POWER_Y;
+	const bands: [number, number][] = [
+		[pips.empty, POWER_PIP_EMPTY],
+		[pips.green, POWER_PIP_GREEN],
+		[pips.yellow, POWER_PIP_YELLOW],
+		[pips.red, POWER_PIP_RED],
+	];
+	for (const [count, frame] of bands) {
+		for (let i = 0; i < count; i++) {
+			blit(dest, hud.palette, hud.pips, frame, x, y);
+			y += POWER_PIP_HEIGHT;
+		}
+	}
 }
 
 export function over_tactical(x: number, y: number): boolean {

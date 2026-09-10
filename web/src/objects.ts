@@ -24,6 +24,7 @@ import {
 } from "./light";
 import { Options } from "./options";
 import { read_palette, read_shp, type ShapeSet } from "./shp";
+import type { SightLooker } from "./shroud";
 import { TICKS_PER_MINUTE } from "./stimer";
 import { build_hicolor_pixel } from "./surface";
 import { theater_from_name, type TheaterSeed } from "./theater";
@@ -62,6 +63,10 @@ export type SpriteAnim = {
 	dead: boolean;
 };
 
+export type SpriteSelect =
+	| { kind: "box"; pre: boolean; lx: number; ly: number; lz: number }
+	| { kind: "shape"; frame: number };
+
 export type MapSprite = {
 	x: number;
 	y: number;
@@ -80,6 +85,15 @@ export type MapSprite = {
 	dir: number;
 	cast_shadow: boolean;
 	anim: SpriteAnim | null;
+	selectable: boolean;
+	blip: number;
+	select: SpriteSelect | null;
+	occupy: { x: number; y: number }[];
+	corner: boolean;
+	rtti: "" | "building" | "infantry" | "unit" | "aircraft";
+	health_ratio: number;
+	veteran: boolean;
+	bridge: boolean;
 };
 
 export type MapArtwork = {
@@ -92,6 +106,16 @@ export type MapArtwork = {
 	lights: MapLightSource[];
 	credits: number;
 	voxels: Map<string, VoxelModel>;
+	lookers: SightLooker[];
+	shroud: ShapeSet | null;
+	select: ShapeSet | null;
+	pips: ShapeSet | null;
+	condition_yellow: number;
+	condition_red: number;
+	power_output: number;
+	power_drain: number;
+	has_radar: boolean;
+	free_radar: boolean;
 };
 
 type OverlayType = {
@@ -141,6 +165,12 @@ type ShapeType = {
 	ready_count: number;
 	ready_jump: number;
 	turret: boolean;
+	sight: number;
+	power: number;
+	drain: number;
+	radar: boolean;
+	zheight: number;
+	core_defender: boolean;
 };
 
 type TiberiumType = {
@@ -346,6 +376,38 @@ function foundation_cells(label: string): { x: number; y: number }[] {
 	return found?.cells ?? [{ x: 0, y: 0 }];
 }
 
+function occupy_size(cells: { x: number; y: number }[]): { w: number; h: number } {
+	let maxx = 0;
+	let maxy = 0;
+	for (const cell of cells) {
+		if (cell.x > maxx) {
+			maxx = cell.x;
+		}
+		if (cell.y > maxy) {
+			maxy = cell.y;
+		}
+	}
+	return { w: maxx + 1, h: maxy + 1 };
+}
+
+function building_select(type: ShapeType): SpriteSelect {
+	const size = occupy_size(type.occupy);
+	return {
+		kind: "box",
+		pre: true,
+		lx: size.w * CELL_LEPTON,
+		ly: size.h * CELL_LEPTON,
+		lz: 40 * (type.zheight * 5),
+	};
+}
+
+function unit_select(type: ShapeType, veteran: boolean): SpriteSelect {
+	if (type.core_defender) {
+		return { kind: "box", pre: false, lx: CELL_LEPTON, ly: CELL_LEPTON, lz: 700 };
+	}
+	return { kind: "shape", frame: (veteran ? 4 : 0) + 3 };
+}
+
 function occupies(origin: { x: number; y: number }, cells: { x: number; y: number }[], x: number, y: number): boolean {
 	return cells.some((cell) => origin.x + cell.x === x && origin.y + cell.y === y);
 }
@@ -406,6 +468,15 @@ function make_sprite(
 		dir: 0,
 		cast_shadow: true,
 		anim: null,
+		selectable: false,
+		blip: 0,
+		select: null,
+		occupy: [{ x: 0, y: 0 }],
+		corner: false,
+		rtti: "",
+		health_ratio: 1,
+		veteran: false,
+		bridge: false,
 		...extra,
 	};
 }
@@ -619,7 +690,23 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		light_green: Math.floor(rules.get_float(name, "LightGreenTint", 1) * NORMAL_LIGHT + 0.1),
 		light_blue: Math.floor(rules.get_float(name, "LightBlueTint", 1) * NORMAL_LIGHT + 0.1),
 		...read_facing(art, graphic, art_image),
+		sight: rules.get_int(name, "Sight", 0),
+		power: read_power(rules, name).output,
+		drain: read_power(rules, name).drain,
+		radar: rules.get_bool(name, "Radar", false),
+		zheight: art.get_int(graphic, "Height", 1),
+		core_defender: rules.get_bool(name, "IsCoreDefender", false),
 	};
+}
+
+function read_power(rules: INIClass, name: string): { output: number; drain: number } {
+	let output = rules.get_int(name, "Power", 0);
+	let drain = 0;
+	if (output < 0) {
+		drain = -output;
+		output = 0;
+	}
+	return { output, drain };
 }
 
 function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
@@ -716,6 +803,35 @@ function sub_pixel(sub: number): { ox: number; oy: number } {
 
 function house_scheme(ini: INIClass, rules: INIClass, house: string): string {
 	return (ini.get_string(house, "Color", "") || rules.get_string(house, "Color", "")).toUpperCase();
+}
+
+function color_hsv(ini: INIClass, rules: INIClass, name: string): { h: number; s: number; v: number } | null {
+	const want = name.toUpperCase();
+	if (!want) {
+		return null;
+	}
+	for (const source of [ini, rules]) {
+		const count = source.entry_count("Colors");
+		for (let i = 0; i < count; i++) {
+			const entry = source.get_entry("Colors", i);
+			if (entry.toUpperCase() === want) {
+				const hsv = parse_hsv(source, "Colors", entry);
+				if (hsv) {
+					return hsv;
+				}
+			}
+		}
+	}
+	return null;
+}
+
+function house_blip(ini: INIClass, rules: INIClass, house: string): number {
+	const hsv = color_hsv(ini, rules, house_scheme(ini, rules, house));
+	if (!hsv) {
+		return build_hicolor_pixel(255, 255, 255);
+	}
+	const rgb = hsv_to_rgb(hsv.h, hsv.s, hsv.v);
+	return build_hicolor_pixel(rgb[0], rgb[1], rgb[2]);
 }
 
 function overlay_draw_offset(type: OverlayType, frame: number): { ox: number; oy: number } {
@@ -875,6 +991,7 @@ function parse_overlay_pack(
 				wall: type.wall ? type.name : "",
 				scheme: type.tiberium ? tiberium_color(id, tiberiums) : "",
 				bright: type.tiberium ? "day" : type.wall ? "object" : "tile",
+				bridge: type.bridge,
 			}),
 		);
 	}
@@ -915,11 +1032,21 @@ type PlacedObject = {
 	y: number;
 	dir: number;
 	sub: number;
+	health: number;
+	veteran: boolean;
 };
 
 function token_int(parts: string[], index: number, fallback: number): number {
 	const value = Number.parseInt(parts[index]?.trim() ?? "", 10);
 	return Number.isFinite(value) ? value : fallback;
+}
+
+function ini_health_ratio(strength: number): number {
+	const n = Math.min(Math.max(strength, 0), 256);
+	if (n > 253) {
+		return 1;
+	}
+	return n / 256;
 }
 
 function parse_placed(line: string, infantry: boolean): PlacedObject | null {
@@ -934,10 +1061,20 @@ function parse_placed(line: string, infantry: boolean): PlacedObject | null {
 	if (!name || !Number.isFinite(x) || !Number.isFinite(y)) {
 		return null;
 	}
+	const health = token_int(parts, 2, 256);
 	if (infantry) {
-		return { house, name, x, y, sub: token_int(parts, 5, 0), dir: token_int(parts, 7, 0) };
+		return {
+			house,
+			name,
+			x,
+			y,
+			sub: token_int(parts, 5, 0),
+			dir: token_int(parts, 7, 0),
+			health,
+			veteran: token_int(parts, 9, 0) !== 0,
+		};
 	}
-	return { house, name, x, y, dir: token_int(parts, 5, 0), sub: 0 };
+	return { house, name, x, y, dir: token_int(parts, 5, 0), sub: 0, health, veteran: token_int(parts, 8, 0) !== 0 };
 }
 
 function parse_infantry(
@@ -968,6 +1105,12 @@ function parse_infantry(
 				oy: offset.oy,
 				frame: infantry_ready_frame(type, parsed.dir),
 				scheme: type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house),
+				selectable: true,
+				blip: house_blip(ini, rules, parsed.house),
+				select: { kind: "shape", frame: parsed.veteran ? 6 : 2 },
+				rtti: "infantry",
+				health_ratio: ini_health_ratio(parsed.health),
+				veteran: parsed.veteran,
 			}),
 		);
 	}
@@ -994,12 +1137,22 @@ function parse_units(
 			continue;
 		}
 		const scheme = type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house);
+		const rtti = section === "Aircraft" ? "aircraft" : "unit";
+		const extra = {
+			scheme,
+			selectable: true as const,
+			blip: house_blip(ini, rules, parsed.house),
+			select: unit_select(type, parsed.veteran),
+			rtti: rtti as "unit" | "aircraft",
+			health_ratio: ini_health_ratio(parsed.health),
+			veteran: parsed.veteran,
+		};
 		if (type.voxel) {
 			sprites.push(
 				make_sprite(parsed.x, parsed.y, [], "unit", layer, {
 					voxel: type.voxel_stem,
 					dir: parsed.dir,
-					scheme,
+					...extra,
 				}),
 			);
 			continue;
@@ -1011,7 +1164,7 @@ function parse_units(
 		sprites.push(
 			make_sprite(parsed.x, parsed.y, files, type.terrain_palette ? "theater" : "unit", layer, {
 				frame: unit_stand_frame(type, parsed.dir),
-				scheme,
+				...extra,
 			}),
 		);
 	}
@@ -1025,7 +1178,7 @@ function parse_structures(
 	seed: TheaterSeed,
 	art: INIClass,
 ): MapSprite[] {
-	const placed: { name: string; x: number; y: number; type: ShapeType; scheme: string }[] = [];
+	const placed: { name: string; x: number; y: number; type: ShapeType; scheme: string; blip: number; health: number }[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
 		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
@@ -1042,6 +1195,8 @@ function parse_structures(
 			y: parsed.y,
 			type,
 			scheme: type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house),
+			blip: house_blip(ini, rules, parsed.house),
+			health: parsed.health,
 		});
 	}
 	const sprites: MapSprite[] = [];
@@ -1068,6 +1223,7 @@ function parse_structures(
 					ox: loc.x,
 					oy: loc.y,
 					scheme: item.scheme,
+					corner: true,
 				}),
 			);
 			continue;
@@ -1080,12 +1236,20 @@ function parse_structures(
 			make_sprite(item.x, item.y, files, item.type.terrain_palette ? "theater" : "unit", 3, {
 				extra_light: item.type.extra_light,
 				scheme: item.scheme,
+				selectable: true,
+				blip: item.blip,
+				select: building_select(item.type),
+				occupy: item.type.occupy,
+				corner: true,
+				rtti: "building",
+				health_ratio: ini_health_ratio(item.health),
 			}),
 		);
 		if (item.type.bib.length > 0) {
 			sprites.push(
 				make_sprite(item.x, item.y, anim_files(item.type.bib, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
 					scheme: item.scheme,
+					corner: true,
 				}),
 			);
 		}
@@ -1097,6 +1261,7 @@ function parse_structures(
 					scheme: item.scheme,
 					cast_shadow: false,
 					anim: create_anim(read_anim_type(art, anim.stem)),
+					corner: true,
 				}),
 			);
 		}
@@ -1128,6 +1293,65 @@ function collect_lights(ini: INIClass, types: Map<string, ShapeType>): MapLightS
 		});
 	}
 	return lights;
+}
+
+function collect_lookers(
+	ini: INIClass,
+	player: string,
+	buildings: Map<string, ShapeType>,
+	infantry: Map<string, ShapeType>,
+	units: Map<string, ShapeType>,
+	aircraft: Map<string, ShapeType>,
+): SightLooker[] {
+	const house = player.toUpperCase();
+	const lookers: SightLooker[] = [];
+	const add = (section: string, types: Map<string, ShapeType>, infantry_line: boolean): void => {
+		const count = ini.entry_count(section);
+		for (let i = 0; i < count; i++) {
+			const parsed = parse_placed(ini.get_string(section, ini.get_entry(section, i)), infantry_line);
+			if (!parsed || parsed.house.toUpperCase() !== house) {
+				continue;
+			}
+			const type = types.get(parsed.name.toUpperCase());
+			if (!type || type.sight <= 0 || type.wall) {
+				continue;
+			}
+			lookers.push({ x: parsed.x, y: parsed.y, sight: type.sight });
+		}
+	};
+	add("Structures", buildings, false);
+	add("Infantry", infantry, true);
+	add("Units", units, false);
+	add("Aircraft", aircraft, false);
+	return lookers;
+}
+
+function collect_economy(
+	ini: INIClass,
+	player: string,
+	buildings: Map<string, ShapeType>,
+): { output: number; drain: number; has_radar: boolean } {
+	const house = player.toUpperCase();
+	let output = 0;
+	let drain = 0;
+	let has_radar = false;
+	const count = ini.entry_count("Structures");
+	for (let i = 0; i < count; i++) {
+		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
+		if (!parsed || parsed.house.toUpperCase() !== house) {
+			continue;
+		}
+		const type = buildings.get(parsed.name.toUpperCase());
+		if (!type || type.wall) {
+			continue;
+		}
+		output += type.power;
+		drain += type.drain;
+		if (type.radar) {
+			has_radar = true;
+		}
+	}
+	return { output, drain, has_radar };
 }
 
 function parse_terrain_section(ini: INIClass, types: Map<string, ShapeType>, seed: TheaterSeed): MapSprite[] {
@@ -1220,6 +1444,17 @@ export async function load_map_artwork(
 	const lights = collect_lights(ini, buildings);
 	const player = ini.get_string("Basic", "Player", "GDI") || "GDI";
 	const credits = ini.get_int(player, "Credits", 0) * 100;
+	const lookers = collect_lookers(ini, player, buildings, infantry, units, aircraft);
+	const economy = collect_economy(ini, player, buildings);
+	const free_radar = ini.get_bool("Basic", "FreeRadar", false);
+	const shroud_packed = await cc_retrieve(directory, "SHROUD.SHP");
+	const shroud = shroud_packed ? read_shp(shroud_packed) : null;
+	const select_packed = await cc_retrieve(directory, "SELECT.SHP");
+	const select = select_packed ? read_shp(select_packed) : null;
+	const pips_packed = await cc_retrieve(directory, "PIPS.SHP");
+	const pips = pips_packed ? read_shp(pips_packed) : null;
+	const condition_yellow = rules_ini.get_float("AudioVisual", "ConditionYellow", 0.5);
+	const condition_red = rules_ini.get_float("AudioVisual", "ConditionRed", 0.5);
 	log(
 		`RULES types: ${overlays.length} overlays, ${buildings.size} buildings, ${terrains.size} terrain, ${infantry.size} infantry, ${units.size} units, ${aircraft.size} aircraft.`,
 	);
@@ -1283,5 +1518,37 @@ export async function load_map_artwork(
 	if (missing.length > 0) {
 		log(`Missing SHP/VXL: ${missing.join(", ")}`);
 	}
-	return { sprites: ready, shapes, theater_palette, unit_palette, schemes, lighting, lights, credits, voxels: voxels_ready };
+	if (!shroud) {
+		log("SHROUD.SHP not found.");
+	}
+	if (!select) {
+		log("SELECT.SHP not found.");
+	}
+	if (!pips) {
+		log("PIPS.SHP not found.");
+	}
+	log(
+		`Power ${economy.output}/${economy.drain}; radar ${economy.has_radar || free_radar ? "available" : "off"}.`,
+	);
+	return {
+		sprites: ready,
+		shapes,
+		theater_palette,
+		unit_palette,
+		schemes,
+		lighting,
+		lights,
+		credits,
+		voxels: voxels_ready,
+		lookers,
+		shroud,
+		select,
+		pips,
+		condition_yellow,
+		condition_red,
+		power_output: economy.output,
+		power_drain: economy.drain,
+		has_radar: economy.has_radar,
+		free_radar,
+	};
 }
