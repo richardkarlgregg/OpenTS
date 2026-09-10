@@ -13,7 +13,7 @@
 import { cc_retrieve } from "./ccfile";
 import type { GameDirectory } from "./files";
 import { INIClass } from "./ini";
-import { ISO_TILE_PIXEL_H, LEVEL_PIXEL_H } from "./isotile";
+import { ISO_TILE_PIXEL_H, ISO_TILE_PIXEL_W, LEVEL_PIXEL_H } from "./isotile";
 import { lcw_straw_decompress } from "./lcw";
 import {
 	building_light_coord,
@@ -22,9 +22,12 @@ import {
 	type MapLightSource,
 	type ScenarioLighting,
 } from "./light";
+import { Options } from "./options";
 import { read_palette, read_shp, type ShapeSet } from "./shp";
+import { TICKS_PER_MINUTE } from "./stimer";
 import { build_hicolor_pixel } from "./surface";
 import { theater_from_name, type TheaterSeed } from "./theater";
+import { read_vxl, type VoxelModel } from "./voxlib";
 
 const MAP_CELL_W = 512;
 const MAP_CELL_H = 512;
@@ -32,6 +35,32 @@ const OVERLAY_NONE = 0xff;
 const OVERLAYDATA_WALL_FRAME_MASK = 0x0f;
 const OVERLAYDATA_BRIDGE_NS_FULL1 = 9;
 const OVERLAYDATA_BRIDGE_NS_END2 = 17;
+const CELL_LEPTON = 256;
+const HUMAN_SHAPE = [7, 7, 6, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 7, 7];
+const STOPPING_COORD = [
+	{ x: CELL_LEPTON / 2, y: CELL_LEPTON / 2 },
+	{ x: CELL_LEPTON / 4, y: CELL_LEPTON / 4 },
+	{ x: (3 * CELL_LEPTON) / 4, y: CELL_LEPTON / 4 },
+	{ x: CELL_LEPTON / 4, y: (3 * CELL_LEPTON) / 4 },
+	{ x: (3 * CELL_LEPTON) / 4, y: (3 * CELL_LEPTON) / 4 },
+];
+
+export type SpriteAnim = {
+	start: number;
+	stages: number;
+	loop_start: number;
+	loop_end: number;
+	loops: number;
+	rate: number;
+	timer: number;
+	stage: number;
+	step: number;
+	delay: number;
+	pingpong: boolean;
+	reverse: boolean;
+	brand_new: boolean;
+	dead: boolean;
+};
 
 export type MapSprite = {
 	x: number;
@@ -47,6 +76,10 @@ export type MapSprite = {
 	wall: string;
 	bright: "tile" | "object" | "day";
 	extra_light: number;
+	voxel: string;
+	dir: number;
+	cast_shadow: boolean;
+	anim: SpriteAnim | null;
 };
 
 export type MapArtwork = {
@@ -57,6 +90,8 @@ export type MapArtwork = {
 	schemes: Map<string, Uint16Array>;
 	lighting: ScenarioLighting;
 	lights: MapLightSource[];
+	credits: number;
+	voxels: Map<string, VoxelModel>;
 };
 
 type OverlayType = {
@@ -79,6 +114,7 @@ type AnimOffset = {
 type ShapeType = {
 	name: string;
 	graphic: string;
+	voxel_stem: string;
 	theater: boolean;
 	new_theater: boolean;
 	terrain_palette: boolean;
@@ -96,6 +132,15 @@ type ShapeType = {
 	light_red: number;
 	light_green: number;
 	light_blue: number;
+	facings: number;
+	walk_frames: number;
+	standing_frames: number;
+	start_stand: number;
+	start_walk: number;
+	ready_frame: number;
+	ready_count: number;
+	ready_jump: number;
+	turret: boolean;
 };
 
 type TiberiumType = {
@@ -357,8 +402,131 @@ function make_sprite(
 		wall: "",
 		bright: "object",
 		extra_light: 0,
+		voxel: "",
+		dir: 0,
+		cast_shadow: true,
+		anim: null,
 		...extra,
 	};
+}
+
+type AnimTypeData = {
+	delay: number;
+	start: number;
+	stages: number;
+	loop_start: number;
+	loop_end: number;
+	loops: number;
+	normalized: boolean;
+	pingpong: boolean;
+	reverse: boolean;
+};
+
+function read_anim_type(art: INIClass, name: string): AnimTypeData {
+	let delay = 1;
+	const rate = art.get_int(name, "Rate", -1);
+	if (rate !== -1) {
+		delay = rate > 0 ? (TICKS_PER_MINUTE / rate) | 0 : 0;
+	}
+	return {
+		delay,
+		start: art.get_int(name, "Start", 0),
+		stages: art.get_int(name, "End", 0),
+		loop_start: art.get_int(name, "LoopStart", 0),
+		loop_end: art.get_int(name, "LoopEnd", 0),
+		loops: art.get_int(name, "LoopCount", 0),
+		normalized: art.get_bool(name, "Normalized", false),
+		pingpong: art.get_bool(name, "PingPong", false),
+		reverse: art.get_bool(name, "Reverse", false),
+	};
+}
+
+function create_anim(type: AnimTypeData): SpriteAnim {
+	let delay = type.delay;
+	if (type.normalized) {
+		delay = Options.Normalize_Delay(delay);
+	}
+	let loops = (1 * type.loops) & 0xff;
+	loops = Math.max(loops, 1);
+	return {
+		start: type.start,
+		stages: type.stages,
+		loop_start: type.loop_start,
+		loop_end: type.loop_end,
+		loops,
+		rate: delay,
+		timer: delay,
+		stage: 0,
+		step: 1,
+		delay: 0,
+		pingpong: type.pingpong,
+		reverse: type.reverse,
+		brand_new: true,
+		dead: false,
+	};
+}
+
+function bind_anim_shape(anim: SpriteAnim, frames: number): void {
+	if (anim.stages === 0) {
+		anim.stages = frames;
+	}
+	if (anim.loop_end === 0) {
+		anim.loop_end = anim.stages;
+	}
+	if (anim.reverse) {
+		anim.stage = anim.loop_end;
+		anim.step = -1;
+	}
+}
+
+export function Anim_Logic(sprite: MapSprite): void {
+	const anim = sprite.anim;
+	if (!anim || anim.dead) {
+		return;
+	}
+	if (anim.timer > 0) {
+		anim.timer--;
+	}
+	if (anim.brand_new) {
+		anim.brand_new = false;
+		sprite.frame = anim.start + anim.stage;
+		return;
+	}
+	if (anim.delay) {
+		anim.delay--;
+		return;
+	}
+	if (!(anim.timer === 0 && anim.rate !== 0)) {
+		return;
+	}
+	anim.stage += anim.step;
+	anim.timer = anim.rate;
+	if (anim.pingpong) {
+		if (
+			(anim.loops <= 1 && (anim.stage >= anim.stages || anim.stage === 0)) ||
+			(anim.loops > 1 && (anim.stage >= anim.loop_end - anim.start || anim.stage === anim.start))
+		) {
+			anim.step = -anim.step;
+			sprite.frame = anim.start + anim.stage;
+			return;
+		}
+	}
+	if (
+		(anim.loops <= 1 && anim.stage >= anim.stages) ||
+		(anim.loops > 1 && anim.stage >= anim.loop_end - anim.start) ||
+		(anim.reverse && anim.stage <= anim.start)
+	) {
+		if (anim.loops && anim.loops !== 255) {
+			anim.loops--;
+		}
+		if (anim.loops) {
+			anim.stage = anim.reverse ? anim.loop_end : anim.loop_start - anim.start;
+		} else {
+			anim.dead = true;
+			return;
+		}
+	}
+	sprite.frame = anim.start + anim.stage;
 }
 
 function theater_filename(name: string, letter: string): string {
@@ -432,6 +600,7 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 	return {
 		name,
 		graphic: art_image,
+		voxel_stem: graphic,
 		theater: art.get_bool(graphic, "Theater", false),
 		new_theater: art.get_bool(graphic, "NewTheater", false),
 		terrain_palette: art.get_bool(graphic, "TerrainPalette", false) || art.get_bool(art_image, "TerrainPalette", false),
@@ -449,7 +618,104 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		light_red: Math.floor(rules.get_float(name, "LightRedTint", 1) * NORMAL_LIGHT + 0.1),
 		light_green: Math.floor(rules.get_float(name, "LightGreenTint", 1) * NORMAL_LIGHT + 0.1),
 		light_blue: Math.floor(rules.get_float(name, "LightBlueTint", 1) * NORMAL_LIGHT + 0.1),
+		...read_facing(art, graphic, art_image),
 	};
+}
+
+function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
+	ShapeType,
+	| "facings"
+	| "walk_frames"
+	| "standing_frames"
+	| "start_stand"
+	| "start_walk"
+	| "ready_frame"
+	| "ready_count"
+	| "ready_jump"
+	| "turret"
+> {
+	const firing = art.get_int(graphic, "FiringFrames", 0);
+	const turret = art.get_bool(graphic, "Turret", false);
+	let facings = 8;
+	if (!firing && !turret) {
+		facings = 1;
+	}
+	facings = art.get_int(graphic, "Facings", facings);
+	const walk_frames = art.get_int(graphic, "WalkFrames", 12);
+	let standing_frames = firing > 0 ? 1 : 0;
+	standing_frames = art.get_int(graphic, "StandingFrames", standing_frames);
+	let start_walk = 0;
+	let start_stand = standing_frames === 0 ? start_walk : facings * walk_frames;
+	start_stand = art.get_int(graphic, "StartStandFrame", start_stand);
+	start_walk = art.get_int(graphic, "StartWalkFrame", start_walk);
+	const seq = art.get_string(graphic, "Sequence", "") || art.get_string(art_image, "Sequence", "");
+	const ready = seq.length > 0 ? art.get_string(seq, "Ready", "") : "";
+	const bits = ready.split(",");
+	return {
+		facings,
+		walk_frames,
+		standing_frames,
+		start_stand,
+		start_walk,
+		ready_frame: Number.parseInt(bits[0]?.trim() ?? "", 10) || 0,
+		ready_count: Number.parseInt(bits[1]?.trim() ?? "", 10) || 1,
+		ready_jump: Number.parseInt(bits[2]?.trim() ?? "", 10) || 0,
+		turret,
+	};
+}
+
+function dir256_raw(dir: number): number {
+	return ((dir & 255) << 8) & 0xffff;
+}
+
+function round_facing(raw: number, shift: number): number {
+	return ((((raw >>> 0) >> shift) + 1) >> 1);
+}
+
+function shape_facing_index(dir: number, count: number): number {
+	const raw = dir256_raw(dir);
+	switch (count) {
+		case 8:
+			return (round_facing(raw, 12) + 1) % 8;
+		case 16:
+			return (round_facing(raw, 11) + 2) % 16;
+		case 32:
+			return (round_facing(raw, 10) + 4) % 32;
+		case 64:
+			return (round_facing(raw, 9) + 8) % 64;
+		default:
+			return 0;
+	}
+}
+
+function unit_stand_frame(type: ShapeType, dir: number): number {
+	const face = shape_facing_index(dir, type.facings);
+	if (type.standing_frames === 0) {
+		return type.start_walk + face * type.walk_frames;
+	}
+	return type.start_stand + face * type.standing_frames;
+}
+
+function infantry_ready_frame(type: ShapeType, dir: number): number {
+	let shapenum = 0;
+	if (type.ready_jump > 0) {
+		shapenum += (HUMAN_SHAPE[round_facing(dir256_raw(dir), 10) % 32] ?? 0) * type.ready_jump;
+	}
+	return shapenum + type.ready_frame;
+}
+
+function sub_pixel(sub: number): { ox: number; oy: number } {
+	const spot = STOPPING_COORD[sub] ?? STOPPING_COORD[0]!;
+	const dx = spot.x - CELL_LEPTON / 2;
+	const dy = spot.y - CELL_LEPTON / 2;
+	return {
+		ox: Math.trunc((dx * (ISO_TILE_PIXEL_W >> 1) - dy * (ISO_TILE_PIXEL_W >> 1)) / CELL_LEPTON),
+		oy: Math.trunc((dx * (ISO_TILE_PIXEL_H >> 1) + dy * (ISO_TILE_PIXEL_H >> 1)) / CELL_LEPTON),
+	};
+}
+
+function house_scheme(ini: INIClass, rules: INIClass, house: string): string {
+	return (ini.get_string(house, "Color", "") || rules.get_string(house, "Color", "")).toUpperCase();
 }
 
 function overlay_draw_offset(type: OverlayType, frame: number): { ox: number; oy: number } {
@@ -550,6 +816,29 @@ async function fetch_shape(
 	return null;
 }
 
+async function fetch_voxel_piece(directory: GameDirectory, stem: string): Promise<VoxelModel | null> {
+	const vxl = await cc_retrieve(directory, `${stem}.VXL`);
+	if (!vxl) {
+		return null;
+	}
+	const hva = await cc_retrieve(directory, `${stem}.HVA`);
+	return read_vxl(vxl, hva);
+}
+
+async function fetch_voxel_model(directory: GameDirectory, graphic: string): Promise<VoxelModel | null> {
+	const body = await fetch_voxel_piece(directory, graphic);
+	if (!body) {
+		return null;
+	}
+	for (const extra of [`${graphic}TUR`, `${graphic}BARL`, `${graphic}W`]) {
+		const piece = await fetch_voxel_piece(directory, extra);
+		if (piece) {
+			body.layers.push(...piece.layers);
+		}
+	}
+	return body;
+}
+
 function parse_overlay_pack(
 	ini: INIClass,
 	types: OverlayType[],
@@ -619,31 +908,48 @@ function connect_walls(sprites: MapSprite[]): void {
 	}
 }
 
-function parse_csv_cell(line: string): { name: string; x: number; y: number } | null {
+type PlacedObject = {
+	house: string;
+	name: string;
+	x: number;
+	y: number;
+	dir: number;
+	sub: number;
+};
+
+function token_int(parts: string[], index: number, fallback: number): number {
+	const value = Number.parseInt(parts[index]?.trim() ?? "", 10);
+	return Number.isFinite(value) ? value : fallback;
+}
+
+function parse_placed(line: string, infantry: boolean): PlacedObject | null {
 	const parts = line.split(",");
 	if (parts.length < 5) {
 		return null;
 	}
+	const house = parts[0]!.trim();
 	const name = parts[1]!.trim();
 	const x = Number.parseInt(parts[3]!.trim(), 10);
 	const y = Number.parseInt(parts[4]!.trim(), 10);
 	if (!name || !Number.isFinite(x) || !Number.isFinite(y)) {
 		return null;
 	}
-	return { name, x, y };
+	if (infantry) {
+		return { house, name, x, y, sub: token_int(parts, 5, 0), dir: token_int(parts, 7, 0) };
+	}
+	return { house, name, x, y, dir: token_int(parts, 5, 0), sub: 0 };
 }
 
-function parse_named_section(
+function parse_infantry(
 	ini: INIClass,
-	section: string,
+	rules: INIClass,
 	types: Map<string, ShapeType>,
 	seed: TheaterSeed,
-	layer: number,
 ): MapSprite[] {
 	const sprites: MapSprite[] = [];
-	const count = ini.entry_count(section);
+	const count = ini.entry_count("Infantry");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_csv_cell(ini.get_string(section, ini.get_entry(section, i)));
+		const parsed = parse_placed(ini.get_string("Infantry", ini.get_entry("Infantry", i)), true);
 		if (!parsed) {
 			continue;
 		}
@@ -655,16 +961,74 @@ function parse_named_section(
 		if (files.length === 0) {
 			continue;
 		}
-		sprites.push(make_sprite(parsed.x, parsed.y, files, type.terrain_palette ? "theater" : "unit", layer));
+		const offset = sub_pixel(parsed.sub);
+		sprites.push(
+			make_sprite(parsed.x, parsed.y, files, type.terrain_palette ? "theater" : "unit", 2, {
+				ox: offset.ox,
+				oy: offset.oy,
+				frame: infantry_ready_frame(type, parsed.dir),
+				scheme: type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house),
+			}),
+		);
 	}
 	return sprites;
 }
 
-function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: TheaterSeed, art: INIClass): MapSprite[] {
-	const placed: { name: string; x: number; y: number; type: ShapeType }[] = [];
+function parse_units(
+	ini: INIClass,
+	rules: INIClass,
+	section: string,
+	types: Map<string, ShapeType>,
+	seed: TheaterSeed,
+	layer: number,
+): MapSprite[] {
+	const sprites: MapSprite[] = [];
+	const count = ini.entry_count(section);
+	for (let i = 0; i < count; i++) {
+		const parsed = parse_placed(ini.get_string(section, ini.get_entry(section, i)), false);
+		if (!parsed) {
+			continue;
+		}
+		const type = types.get(parsed.name.toUpperCase());
+		if (!type || type.invisible || type.wall) {
+			continue;
+		}
+		const scheme = type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house);
+		if (type.voxel) {
+			sprites.push(
+				make_sprite(parsed.x, parsed.y, [], "unit", layer, {
+					voxel: type.voxel_stem,
+					dir: parsed.dir,
+					scheme,
+				}),
+			);
+			continue;
+		}
+		const files = object_files(type, seed);
+		if (files.length === 0) {
+			continue;
+		}
+		sprites.push(
+			make_sprite(parsed.x, parsed.y, files, type.terrain_palette ? "theater" : "unit", layer, {
+				frame: unit_stand_frame(type, parsed.dir),
+				scheme,
+			}),
+		);
+	}
+	return sprites;
+}
+
+function parse_structures(
+	ini: INIClass,
+	rules: INIClass,
+	types: Map<string, ShapeType>,
+	seed: TheaterSeed,
+	art: INIClass,
+): MapSprite[] {
+	const placed: { name: string; x: number; y: number; type: ShapeType; scheme: string }[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_csv_cell(ini.get_string("Structures", ini.get_entry("Structures", i)));
+		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
 		if (!parsed) {
 			continue;
 		}
@@ -672,7 +1036,13 @@ function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: Th
 		if (!type || type.voxel || type.invisible || type.wall) {
 			continue;
 		}
-		placed.push({ name: parsed.name.toUpperCase(), x: parsed.x, y: parsed.y, type });
+		placed.push({
+			name: parsed.name.toUpperCase(),
+			x: parsed.x,
+			y: parsed.y,
+			type,
+			scheme: type.terrain_palette ? "" : house_scheme(ini, rules, parsed.house),
+		});
 	}
 	const sprites: MapSprite[] = [];
 	const addon_at = new Map<string, number>();
@@ -697,6 +1067,7 @@ function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: Th
 				make_sprite(parent.x, parent.y, files, item.type.terrain_palette ? "theater" : "unit", 4, {
 					ox: loc.x,
 					oy: loc.y,
+					scheme: item.scheme,
 				}),
 			);
 			continue;
@@ -708,11 +1079,14 @@ function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: Th
 		sprites.push(
 			make_sprite(item.x, item.y, files, item.type.terrain_palette ? "theater" : "unit", 3, {
 				extra_light: item.type.extra_light,
+				scheme: item.scheme,
 			}),
 		);
 		if (item.type.bib.length > 0) {
 			sprites.push(
-				make_sprite(item.x, item.y, anim_files(item.type.bib, seed, art), item.type.terrain_palette ? "theater" : "unit", 4),
+				make_sprite(item.x, item.y, anim_files(item.type.bib, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
+					scheme: item.scheme,
+				}),
 			);
 		}
 		for (const anim of item.type.active) {
@@ -720,6 +1094,9 @@ function parse_structures(ini: INIClass, types: Map<string, ShapeType>, seed: Th
 				make_sprite(item.x, item.y, anim_files(anim.stem, seed, art), item.type.terrain_palette ? "theater" : "unit", 4, {
 					ox: anim.x,
 					oy: anim.y,
+					scheme: item.scheme,
+					cast_shadow: false,
+					anim: create_anim(read_anim_type(art, anim.stem)),
 				}),
 			);
 		}
@@ -731,7 +1108,7 @@ function collect_lights(ini: INIClass, types: Map<string, ShapeType>): MapLightS
 	const lights: MapLightSource[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_csv_cell(ini.get_string("Structures", ini.get_entry("Structures", i)));
+		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
 		if (!parsed) {
 			continue;
 		}
@@ -817,17 +1194,34 @@ export async function load_map_artwork(
 	const infantry = new Map(
 		list_types(rules_ini, "InfantryTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
 	);
+	const units = new Map(
+		list_types(rules_ini, "VehicleTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
+	);
+	const aircraft = new Map(
+		list_types(rules_ini, "AircraftTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
+	);
 
 	const overlay_packed = ini.get_uublock("OverlayPack");
 	const overlay_sprites = parse_overlay_pack(ini, overlays, seed, tiberiums);
 	const terrain_sprites = parse_terrain_section(ini, terrains, seed);
-	const structure_sprites = parse_structures(ini, buildings, seed, art_ini);
-	const infantry_sprites = parse_named_section(ini, "Infantry", infantry, seed, 2);
-	const sprites: MapSprite[] = [...overlay_sprites, ...terrain_sprites, ...structure_sprites, ...infantry_sprites];
+	const structure_sprites = parse_structures(ini, rules_ini, buildings, seed, art_ini);
+	const infantry_sprites = parse_infantry(ini, rules_ini, infantry, seed);
+	const unit_sprites = parse_units(ini, rules_ini, "Units", units, seed, 2);
+	const aircraft_sprites = parse_units(ini, rules_ini, "Aircraft", aircraft, seed, 5);
+	const sprites: MapSprite[] = [
+		...overlay_sprites,
+		...terrain_sprites,
+		...structure_sprites,
+		...infantry_sprites,
+		...unit_sprites,
+		...aircraft_sprites,
+	];
 	const lighting = read_scenario_lighting(ini);
 	const lights = collect_lights(ini, buildings);
+	const player = ini.get_string("Basic", "Player", "GDI") || "GDI";
+	const credits = ini.get_int(player, "Credits", 0) * 100;
 	log(
-		`RULES types: ${overlays.length} overlays, ${buildings.size} buildings, ${terrains.size} terrain, ${infantry.size} infantry.`,
+		`RULES types: ${overlays.length} overlays, ${buildings.size} buildings, ${terrains.size} terrain, ${infantry.size} infantry, ${units.size} units, ${aircraft.size} aircraft.`,
 	);
 	log(
 		`Tiberium: ${tiberiums.map((type) => `${type.name} ${type.color} @${type.start}`).join(", ") || "none"}; ${schemes.size} color schemes.`,
@@ -836,14 +1230,32 @@ export async function load_map_artwork(
 		`Lighting Ambient=${(lighting.ambient / 100).toFixed(2)} Ground=${lighting.ground} Level=${lighting.level}; ${lights.length} light sources.`,
 	);
 	log(
-		`Scenario lists ${ini.entry_count("Structures")} structures, ${ini.entry_count("Terrain")} terrain; OverlayPack ${overlay_packed.length} bytes.`,
+		`Scenario lists ${ini.entry_count("Structures")} structures, ${ini.entry_count("Terrain")} terrain, ${ini.entry_count("Infantry")} infantry, ${ini.entry_count("Units")} units, ${ini.entry_count("Aircraft")} aircraft; OverlayPack ${overlay_packed.length} bytes.`,
 	);
 
 	const cache = new Map<string, ShapeSet | null>();
 	const shapes = new Map<string, ShapeSet>();
+	const voxel_cache = new Map<string, VoxelModel | null>();
+	const voxels_ready = new Map<string, VoxelModel>();
 	const ready: MapSprite[] = [];
 	const missing: string[] = [];
 	for (const sprite of sprites) {
+		if (sprite.voxel) {
+			const key = sprite.voxel.toUpperCase();
+			if (!voxel_cache.has(key)) {
+				voxel_cache.set(key, await fetch_voxel_model(directory, sprite.voxel));
+			}
+			const model = voxel_cache.get(key);
+			if (!model) {
+				if (missing.length < 8) {
+					missing.push(`${sprite.voxel}.VXL`);
+				}
+				continue;
+			}
+			voxels_ready.set(key, model);
+			ready.push({ ...sprite, voxel: key });
+			continue;
+		}
 		const key = await fetch_shape(directory, cache, sprite.names);
 		if (!key) {
 			if (missing.length < 8) {
@@ -856,15 +1268,20 @@ export async function load_map_artwork(
 			continue;
 		}
 		shapes.set(key, shape);
-		ready.push({ ...sprite, file: key });
+		if (sprite.anim) {
+			bind_anim_shape(sprite.anim, shape.frames.length);
+			ready.push({ ...sprite, file: key, frame: sprite.anim.start + sprite.anim.stage });
+		} else {
+			ready.push({ ...sprite, file: key });
+		}
 	}
 
 	ready.sort((a, b) => a.x + a.y - (b.x + b.y) || a.layer - b.layer);
 	log(
-		`Map objects: ${overlay_sprites.length} overlays, ${terrain_sprites.length} terrain, ${structure_sprites.length} structures, ${infantry_sprites.length} infantry; ${ready.length} sprites, ${shapes.size} SHP files.`,
+		`Map objects: ${overlay_sprites.length} overlays, ${terrain_sprites.length} terrain, ${structure_sprites.length} structures, ${infantry_sprites.length} infantry, ${unit_sprites.length} units, ${aircraft_sprites.length} aircraft; ${ready.length} sprites, ${shapes.size} SHP files, ${voxels_ready.size} VXL models.`,
 	);
 	if (missing.length > 0) {
-		log(`Missing SHP/TEM: ${missing.join(", ")}`);
+		log(`Missing SHP/VXL: ${missing.join(", ")}`);
 	}
-	return { sprites: ready, shapes, theater_palette, unit_palette, schemes, lighting, lights };
+	return { sprites: ready, shapes, theater_palette, unit_palette, schemes, lighting, lights, credits, voxels: voxels_ready };
 }

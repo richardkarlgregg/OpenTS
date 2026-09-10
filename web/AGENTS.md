@@ -30,8 +30,9 @@ game.
   loading picture comes from `Pick_Load_Background_Name`: CD 0 is GDI
   (`LOAD400C`/`LOAD400D`), CD 1 is Nod (`LOAD400A`/`LOAD400B`).   Clicking the
   load screen opens a pannable isometric tile view from theater TMP files
-  (`ISO<Suffix>.PAL` and `Draw_Tile`), with overlay, terrain, building, and
-  infantry SHPs from `OverlayPack` / the scenario INI. Nested theater mixes
+  (`ISO<Suffix>.PAL` and `Draw_Tile`), with overlay, terrain, building,
+  infantry, unit, and aircraft SHPs from `OverlayPack` / the scenario INI.
+  Nested theater mixes
   (`TEMPERAT.MIX` / `TEM.MIX`) and side mixes (`SIDEC01.MIX` and the matching
   uncached/CD archives) are opened the same way `Init_Theater` and
   `Prep_For_Side` mount them. Theater-palette art (`TerrainPalette=yes`,
@@ -44,7 +45,24 @@ game.
   `SHAPE_DARKEN`. Map lighting comes from the scenario `[Lighting]` section
   (ambient, RGB tint, height `Level`/`Ground`) plus `LightIntensity` sources
   on buildings, including `InvisibleInGame` lamp posts. Those posts and wall
-  buildings that convert to overlay are not drawn. Escape returns to the menu. Skirmish lists
+  buildings that convert to overlay are not drawn. Infantry use the ART
+  `Sequence` Ready frames and `HumanShape` facing; SHP vehicles use
+  `Shape_Facing_Index` stand frames. House `Color=` remaps techno objects.
+  Voxel units load `.VXL`/`.HVA` (plus `TUR`/`BARL`/`W` pieces) and project
+  through the isometric view matrix and body facing. The view is the 640x400
+  in-game layout: tabs and credits, `RADAR.SHP` frame 0, `SIDE1`/`SIDE2`/`SIDE3`/`ADDON`
+  chrome, and the repair/sell/power/waypoint buttons on one row, with a
+  472x384 tactical map. `MOUSE.SHP` is blitted with `MouseClass` hotspots
+  (`MOUSE_NORMAL` is frame 0, hotspot min/min) through `MOUSEPAL.PAL`, the
+  source palette `MouseDrawer` is built from. The pointer animates from
+  `MouseControl` `FrameRate` on the 60 Hz system timer. Campaign frames
+  advance every `Options.GameSpeed` system ticks (default 3). Building
+  `ActiveAnim` uses ART `Rate`/`Start`/`End`/`LoopCount` through
+  `StageClass::Graphic_Logic`. Edge scroll is `ScrollClass::Scroll_Edge`
+  (arrow cursors `MOUSE_N`…`MOUSE_NW`, barred when `Scroll_Dir` cannot
+  move). The camera is `TacticalCoord` (view center); `TacPixel` subtracts
+  half the tactical rect before blit, and `Tactical_Position_Limits` clamp
+  that center. Arrow keys also pan. Escape returns to the menu. Skirmish lists
   `MISSIONS.PKT` and loose `.MPR` maps the same way. Simulation, movies,
   and save/load are not playable yet.
 
