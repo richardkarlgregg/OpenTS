@@ -52,10 +52,12 @@ import {
 	Make_Foot,
 	Movement_AI,
 	Scale_To_256,
+	TUNNEL,
 	type CellTerrain,
 	type FootState,
 	type PathEnter,
 } from "./walk";
+import { Build_Path_Graph, Threat_Region, type PathGraph, type TubePath } from "./zone";
 
 const MAP_CELL_W = 512;
 const MAP_CELL_H = 512;
@@ -168,6 +170,8 @@ export type MapArtwork = {
 	sidebar: SidebarStrips;
 	production: ProductionState;
 	terrain: Map<string, CellTerrain>;
+	path_graph: PathGraph | null;
+	tubes: TubePath[];
 };
 
 export type PendingPlace = {
@@ -274,6 +278,8 @@ export type ShapeType = {
 	gate_stages: number;
 	deploy_time: number;
 	gate_close_delay: number;
+	threat_posed: number;
+	threat_avoid: number;
 };
 
 type TiberiumType = {
@@ -888,6 +894,8 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		gate_stages: art.get_int(graphic, "GateStages", 9),
 		deploy_time: rules.get_float(name, "DeployTime", 0),
 		gate_close_delay: rules.get_float(name, "GateCloseDelay", 0),
+		threat_posed: rules.get_int(name, "ThreatPosed", 0),
+		threat_avoid: rules.get_float(name, "ThreatAvoidanceCoefficient", 0),
 	};
 }
 
@@ -1801,6 +1809,38 @@ function parse_terrain_section(ini: INIClass, types: Map<string, ShapeType>, see
 	return sprites;
 }
 
+function parse_tubes(ini: INIClass): TubePath[] {
+	const tubes: TubePath[] = [];
+	const count = ini.entry_count("Tubes");
+	for (let i = 0; i < count; i++) {
+		const entry = ini.get_entry("Tubes", i);
+		const parts = ini.get_string("Tubes", entry).split(",");
+		const nums = parts.map((part) => {
+			const trimmed = part.trim();
+			if (trimmed.length === 0) {
+				return Number.NaN;
+			}
+			return Number(trimmed);
+		});
+		const enter = { x: nums[0] || 0, y: nums[1] || 0 };
+		const dir = nums[2] || 0;
+		const exit = { x: nums[3] || 0, y: nums[4] || 0 };
+		const dirs: number[] = [];
+		for (let d = 5; d < nums.length; d++) {
+			const facing = Number.isFinite(nums[d]) ? nums[d]! : -1;
+			dirs.push(facing);
+			if (facing < 0) {
+				break;
+			}
+		}
+		if (dirs.length === 0 || (dirs[dirs.length - 1] ?? -1) >= 0) {
+			dirs.push(-1);
+		}
+		tubes.push({ enter, exit, dir, dirs });
+	}
+	return tubes;
+}
+
 export async function load_map_artwork(
 	directory: GameDirectory,
 	ini: INIClass,
@@ -2050,6 +2090,8 @@ export async function load_map_artwork(
 			cliff_back,
 		},
 		terrain: new Map(),
+		path_graph: null,
+		tubes: parse_tubes(ini),
 	};
 }
 
@@ -2066,6 +2108,38 @@ export function Factory_AI(artwork: MapArtwork): FactoryObject[] {
 	}
 	Refresh_Queue(artwork);
 	return ready;
+}
+
+export function Bind_Path_Graph(artwork: MapArtwork, cells: Set<string>): void {
+	const walls = new Set<string>();
+	const bridges: Point2D[] = [];
+	const threat = new Map<number, number>();
+	for (const sprite of artwork.sprites) {
+		if (sprite.wall) {
+			walls.add(`${sprite.x},${sprite.y}`);
+		}
+		if (sprite.bridge) {
+			bridges.push({ x: sprite.x, y: sprite.y });
+		}
+		if (sprite.owned || (sprite.rtti !== "building" && sprite.rtti !== "infantry" && sprite.rtti !== "unit")) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (!type || type.threat_posed <= 0) {
+			continue;
+		}
+		const region = Threat_Region(sprite.x, sprite.y);
+		threat.set(region, (threat.get(region) ?? 0) + type.threat_posed);
+	}
+	artwork.path_graph = Build_Path_Graph(
+		artwork.terrain,
+		cells,
+		walls,
+		artwork.production.cliff_back,
+		artwork.tubes,
+		bridges,
+		threat,
+	);
 }
 
 export function Gate_AI(artwork: MapArtwork): void {
@@ -2136,9 +2210,16 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 		const type = type_for_sprite(artwork, sprite);
 		const before = Coord_Cell(foot.lx, foot.ly);
 		const dest = foot.dest;
-		const can_step: PathEnter = (from, to) => foot_step(artwork, sprite, from, to, dest, play, cells, false);
-		const can_path: PathEnter = (from, to) => foot_step(artwork, sprite, from, to, dest, play, cells, true);
-		const moved = Movement_AI(foot, can_step, (cell) => Try_Open_Gate(artwork, cell), can_path);
+		const can_step: PathEnter = (from, to, dir) => foot_step(artwork, sprite, from, to, dest, play, cells, false, dir);
+		const can_path: PathEnter = (from, to, dir) => foot_step(artwork, sprite, from, to, dest, play, cells, true, dir);
+		const moved = Movement_AI(
+			foot,
+			can_step,
+			(cell) => Try_Open_Gate(artwork, cell),
+			can_path,
+			artwork.path_graph,
+			type?.threat_avoid ?? 0,
+		);
 		if (!moved) {
 			if (type && sprite.rtti === "infantry" && !foot.moving) {
 				sprite.frame = infantry_ready_frame(type, sprite.dir);
@@ -2450,8 +2531,9 @@ function foot_step(
 	play: Rect,
 	cells: Set<string>,
 	allow_gate: boolean,
+	dir = 0,
 ): boolean {
-	if (!Can_Reach(from, to, artwork.terrain)) {
+	if (dir !== TUNNEL && !Can_Reach(from, to, artwork.terrain, artwork.path_graph)) {
 		return false;
 	}
 	if (dest && to.x === dest.x && to.y === dest.y) {

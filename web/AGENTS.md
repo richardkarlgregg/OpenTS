@@ -96,9 +96,18 @@ game.
   Queue counts print at `QUEUE_COUNT_X_OFFSET`. They walk with
   `WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
   `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Path
-  search is `AStarClass::Find_Path_Regular` (cell A*, Euclidean heuristic,
-  facing tie-break costs). `FootClass::Can_Reach` forbids a height change
-  other than 0, or 1 when the lower cell has a TMP ramp.
+  search is `AStarClass::Find_Path` (hierarchical subzones with
+  `Region_Threat` * `ThreatAvoidanceCoefficient` on rough/coarse edges,
+  up to five banned-edge retries after `Ban_Blocked_Subzone_Edges`, then
+  cell A* with a Euclidean heuristic, facing tie-break costs, and
+  `TUNNEL` jumps through `[Tubes]`). Overlay `bridge=true` cells mark
+  `IsUnderBridge` and stitch subzone links at span ends plus the
+  perpendicular side cells. `hs_anchor` maps a deck cell to the nearer
+  span end before hierarchical search. `Cut_Corners` /
+  `Optimize_Moves` skip tunnel steps. `MapClass::Reset_Subzone` builds
+  fine/rough/coarse blocks (2x2, 4x4, 8x8). `FootClass::Can_Reach`
+  forbids a height change other than 0, or 1 when the lower cell has a
+  TMP ramp, or 4 when either cell is under a bridge deck.
   `CliffBackImpassability=2` marks cells 4+ below listed neighbours as
   `LAND_ROCK`. Overlay `Wall=yes` cells are impassable. Owned
   `Gate=yes` buildings return `MOVE_CLOSED_GATE` until

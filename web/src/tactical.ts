@@ -39,6 +39,7 @@ import {
 	Cameo_Right,
 	Can_Move_To,
 	Can_Place_Building,
+	Bind_Path_Graph,
 	Factory_AI,
 	Foot_AI,
 	Gate_AI,
@@ -1100,6 +1101,9 @@ export async function Show_Tactical(
 		heights.set(`${cell.x},${cell.y}`, cell.height);
 	}
 	const cell_keys = new Set(heights.keys());
+	if (artwork) {
+		Bind_Path_Graph(artwork, cell_keys);
+	}
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
 	let selected: MapSprite | null = null;
 	const exits: FactoryObject[] = [];

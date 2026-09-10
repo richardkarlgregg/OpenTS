@@ -13,10 +13,12 @@
 import { Find_Path_Regular, type PathEnter } from "./astar";
 import type { Point2D } from "./ini";
 import { ISO_TILE_PIXEL_H, ISO_TILE_PIXEL_W } from "./isotile";
+import { graph_cell, tube_at, type PathGraph } from "./zone";
 
 export const CELL_LEPTON = 256;
 export const FACING_COUNT = 8;
-export const FACING_NONE = 8;
+export const FACING_NONE = -1;
+export const TUNNEL = FACING_COUNT;
 export const CLOSE_ENOUGH = 17;
 export const WALK_RATE = 3;
 export const MPH_LIGHT_SPEED = 255;
@@ -131,7 +133,12 @@ export function terrain_of(terrain: Map<string, CellTerrain>, cell: Point2D): Ce
 	return terrain.get(`${cell.x},${cell.y}`) ?? { height: 0, ramp: RAMP_NONE };
 }
 
-export function Can_Reach(from: Point2D, to: Point2D, terrain: Map<string, CellTerrain>): boolean {
+export function Can_Reach(
+	from: Point2D,
+	to: Point2D,
+	terrain: Map<string, CellTerrain>,
+	graph: PathGraph | null = null,
+): boolean {
 	const adjacent = terrain_of(terrain, from);
 	const current = terrain_of(terrain, to);
 	const height_difference = adjacent.height;
@@ -145,14 +152,28 @@ export function Can_Reach(from: Point2D, to: Point2D, terrain: Map<string, CellT
 			}
 			return adjacent.ramp !== RAMP_NONE;
 		case BRIDGE_CELL_HEIGHT:
+			if (graph) {
+				const from_cell = graph_cell(graph, from);
+				const to_cell = graph_cell(graph, to);
+				if (from_cell?.under_bridge || to_cell?.under_bridge) {
+					return true;
+				}
+			}
 			return false;
 		default:
 			return false;
 	}
 }
 
-export function Find_Path(from: Point2D, to: Point2D, can_enter: PathEnter, maxlen = 200): number[] {
-	return Find_Path_Regular(from, to, can_enter, maxlen);
+export function Find_Path(
+	from: Point2D,
+	to: Point2D,
+	can_enter: PathEnter,
+	maxlen = 200,
+	graph: PathGraph | null = null,
+	avoid = 0,
+): number[] {
+	return Find_Path_Regular(from, to, can_enter, maxlen, graph, avoid);
 }
 
 export function Assign_Destination(foot: FootState, cell: Point2D | null): void {
@@ -167,6 +188,8 @@ export function Movement_AI(
 	can_enter: PathEnter,
 	try_gate?: (cell: Point2D) => boolean,
 	can_path?: PathEnter,
+	graph: PathGraph | null = null,
+	avoid = 0,
 ): boolean {
 	if (!foot.moving && !foot.head) {
 		return false;
@@ -188,7 +211,7 @@ export function Movement_AI(
 		}
 		const walkable = can_path ?? can_enter;
 		if (foot.path.length === 0) {
-			foot.path = Find_Path(here, foot.dest, walkable);
+			foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
 			if (foot.path.length === 0) {
 				foot.dest = null;
 				foot.moving = false;
@@ -202,12 +225,26 @@ export function Movement_AI(
 			foot.moving = false;
 			return false;
 		}
+		if (dir === TUNNEL && graph) {
+			const tube = tube_at(graph, here);
+			if (!tube) {
+				foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
+				return false;
+			}
+			const exit = tube.exit;
+			if (!can_enter(here, exit, dir)) {
+				foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
+				return false;
+			}
+			foot.head = Cell_Center(exit);
+			return true;
+		}
 		const next = Adjacent_Cell(here, dir);
 		if (!can_enter(here, next, dir)) {
 			if (try_gate?.(next)) {
 				return false;
 			}
-			foot.path = Find_Path(here, foot.dest, walkable);
+			foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
 			return false;
 		}
 		foot.head = Cell_Center(next);
