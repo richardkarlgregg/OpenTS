@@ -68,8 +68,11 @@ game.
   triggers. `CREATE_TEAM` recruits matching live members of that house.
   `REINFORCEMENTS` / `REINFORCEMENTS_SPECIAL` spawn the task force: drop-pod
   infantry (`Droppod=yes`) appear at the team origin or action waypoint;
-  transports such as DSHP carry passengers as cargo and `UNLOAD` them, then a
-  loaner aircraft flies its remaining `MOVE` and is removed. Team scripts run
+  transports such as DSHP carry passengers as cargo and `UNLOAD` them after
+  the aircraft has landed (`FlyLocomotionClass` heading, `CurrentSpeed`
+  ease, dropship climb 16, `SlowdownDistance` approach). A loaner then
+  flies remaining `MOVE` or `TransportsReturnOnUnload` and is removed when
+  it leaves `In_Radar`. Team scripts run
   `MOVE` / `ATT_WAYPT` / `GUARD` / `UNLOAD` / `LOOP` / `SET_LOCAL` /
   `CHANGE_HOUSE`. Placing a building with `FreeUnit=` (the GDI1A refinery)
   spawns that vehicle to the south and starts `MISSION_HARVEST`. Harvesters
@@ -206,8 +209,11 @@ game.
   Owner, so they are not sold. Completed aircraft leave through
   `BuildingClass::Exit_Object`: a free helipad docks at occupy-center; a busy
   pad spawns on the local-rect edge at `FlightLevel` and
-  `Assign_Destination` to the pad. Aircraft `Fly_AI` climbs or descends 16
-  leptons per frame and ignores ground occupy. The waypoint button calls
+  `Assign_Destination` to the pad. Aircraft use `FlyLocomotionClass`:
+  `Move_Coord` along `PrimaryFacing`, `CurrentSpeed` eases toward
+  `TargetSpeed` by 0.1 per frame, dropships climb at most 16 leptons, and
+  `IsDropship` eases `FlightLevel` inside `SlowdownDistance` before
+  `Land()`. Ground occupy is ignored. The waypoint button calls
   `Waypoint_Mode_Control` (`0` off, `1` on, `-1` toggle; starts
   `HouseClass::New_Waypoint_Path`, refused when all 12 paths are in use).
   Those modes `Unselect_All`, so `ScrollClass::What_Action` only applies

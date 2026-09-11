@@ -98,6 +98,20 @@ export function Set_Drive_Facing(foot: FootState, dir256: number): void {
 	set_body(foot, dir256);
 }
 
+export function Set_Desired_Body(foot: FootState, body: number): void {
+	set_desired(foot, body);
+}
+
+export function Tick_Facing(foot: FootState): void {
+	if (foot.rotation_timer > 0) {
+		foot.rotation_timer -= 1;
+	}
+}
+
+export function Current_Body(foot: FootState): number {
+	return current_body(foot);
+}
+
 export function Set_Drive_ROT(foot: FootState, rate: number): void {
 	foot.rot_body = from_dir256(Math.min(Math.max(0, rate), DIR_S - 1));
 }

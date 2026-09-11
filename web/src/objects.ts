@@ -144,7 +144,6 @@ import {
 	Direction_Facing,
 	FACING_NONE,
 	Facing_Dir256,
-	Fly_AI,
 	Make_Foot,
 	Movement_AI,
 	Scale_To_256,
@@ -154,6 +153,7 @@ import {
 	type PathEnter,
 } from "./walk";
 import { Body_Dir256, Drive_AI, Set_Drive_Facing } from "./drive";
+import { Dir256_Toward, Fly_AI } from "./fly";
 import { Build_Path_Graph, graph_cell, Threat_Region, type PathGraph, type TubePath } from "./zone";
 
 const MAP_CELL_W = 512;
@@ -277,6 +277,7 @@ export type MapSprite = {
 	team: TeamClass | null;
 	cargo: MapSprite[];
 	loaner: boolean;
+	archive_target: Point2D | null;
 	storage: number[];
 	harvest: HarvestState | null;
 	tib: number;
@@ -496,6 +497,8 @@ export type ShapeType = {
 	toggle_power: boolean;
 	helipad: boolean;
 	flight_level: number;
+	is_dropship: boolean;
+	slowdown_distance: number;
 	undeploys_into: string;
 	construction_yard: boolean;
 	unit_repair: boolean;
@@ -910,6 +913,7 @@ function make_sprite(
 		team: null,
 		cargo: [],
 		loaner: false,
+		archive_target: null,
 		storage: [],
 		harvest: null,
 		tib: -1,
@@ -1204,6 +1208,8 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		toggle_power: rules.get_bool(name, "TogglePower", true),
 		helipad: rules.get_bool(name, "Helipad", false),
 		flight_level: rules.get_int(name, "FlightLevel", -1),
+		is_dropship: rules.get_bool(name, "IsDropship", false),
+		slowdown_distance: rules.get_int(name, "SlowdownDistance", 500),
 		undeploys_into: rules.get_string(name, "UndeploysInto", ""),
 		construction_yard: rules.get_bool(name, "ConstructionYard", false),
 		unit_repair: rules.get_bool(name, "UnitRepair", false),
@@ -2677,6 +2683,9 @@ export function Team_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 				team.Disband();
 				continue;
 			}
+			for (const member of team_members(team)) {
+				member.archive_target = null;
+			}
 		}
 		if (team.TimeOut > 0) {
 			team.TimeOut--;
@@ -2759,6 +2768,9 @@ function member_arrived(sprite: MapSprite): boolean {
 	if (!foot) {
 		return true;
 	}
+	if (sprite.rtti === "aircraft") {
+		return !foot.dest && !foot.is_taking_off && !foot.is_landing && foot.height_agl <= 0 && foot.speed === 0;
+	}
 	return !foot.dest && !foot.moving && !foot.head && !foot.is_driving;
 }
 
@@ -2791,6 +2803,12 @@ function assign_team_move(artwork: MapArtwork, team: TeamClass, cell: Point2D, p
 		if (member.rtti !== "aircraft" && !Can_Move_To(artwork, member, dest, play, cells)) {
 			dest = nearby_enter(artwork, member, dest, play, cells) ?? dest;
 		}
+		if (team.Class.TransportsReturnOnUnload && !member.archive_target) {
+			const type = type_for_sprite(artwork, member);
+			if (type && type.passengers > 0) {
+				member.archive_target = { x: member.x, y: member.y };
+			}
+		}
 		Assign_Destination(member.foot, dest);
 		Assign_Target(member, null);
 	}
@@ -2798,7 +2816,7 @@ function assign_team_move(artwork: MapArtwork, team: TeamClass, cell: Point2D, p
 
 function finish_loaners(artwork: MapArtwork, team: TeamClass): void {
 	for (const member of team_members(team).slice()) {
-		if (member.loaner) {
+		if (member.loaner && member.rtti !== "aircraft") {
 			Remove_Sprite(artwork, member);
 		}
 	}
@@ -2880,6 +2898,18 @@ function run_team_mission(
 			}
 			break;
 		case TMISSION_UNLOAD:
+			if (
+				playing_members(artwork, team).some((member) => {
+					const foot = member.foot;
+					return (
+						member.rtti === "aircraft" &&
+						foot &&
+						(foot.dest || foot.is_taking_off || foot.is_landing || foot.height_agl > 0)
+					);
+				})
+			) {
+				break;
+			}
 			if (unload_team(artwork, team, play, cells, shroud, mission.Data)) {
 				team.IsNextMission = true;
 			}
@@ -2947,17 +2977,6 @@ function run_team_mission(
 			team.IsNextMission = true;
 			break;
 	}
-	for (const member of team_members(team).slice()) {
-		if (
-			member.loaner &&
-			team.Unloaded &&
-			mission.Mission !== TMISSION_UNLOAD &&
-			artwork.sprites.includes(member) &&
-			member_arrived(member)
-		) {
-			Remove_Sprite(artwork, member);
-		}
-	}
 }
 
 function unload_team(
@@ -2992,12 +3011,25 @@ function unload_team(
 		Sort_Sprites(artwork);
 		return false;
 	}
-	if (mode === 2 || mode === 3) {
-		for (const member of playing_members(artwork, team).slice()) {
-			const type = type_for_sprite(artwork, member);
-			if (type && type.passengers > 0) {
+	const air_transport = playing_members(artwork, team).some((member) => {
+		const type = type_for_sprite(artwork, member);
+		return member.rtti === "aircraft" && !!type && type.passengers > 0;
+	});
+	for (const member of playing_members(artwork, team).slice()) {
+		const type = type_for_sprite(artwork, member);
+		const capacity = type?.passengers ?? 0;
+		if (capacity === 0 || (air_transport && member.rtti !== "aircraft")) {
+			if (mode === 1 || mode === 3) {
 				team.Remove(member);
 			}
+		} else if (team.Class.TransportsReturnOnUnload) {
+			team.Remove(member);
+			if (member.foot) {
+				Assign_Destination(member.foot, member.archive_target);
+			}
+			member.archive_target = null;
+		} else if (mode === 2 || mode === 3) {
+			team.Remove(member);
 		}
 	}
 	team.Unloaded = true;
@@ -3302,6 +3334,11 @@ async function Place_Reinforcement(
 			born.oy = placed.oy;
 			if (!atwaypoint || born.rtti === "aircraft") {
 				Assign_Destination(born.foot, origin);
+			}
+			if (born.rtti === "aircraft") {
+				born.dir = Dir256_Toward({ x: born.foot.lx, y: born.foot.ly }, Cell_Center(origin));
+				Set_Drive_Facing(born.foot, born.dir);
+				born.foot.flight_level = born.foot.height_agl;
 			}
 		}
 		artwork.sprites.push(born);
@@ -4864,6 +4901,7 @@ export async function Cameo_Left(
 
 export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shroud: ShroudMap | null): void {
 	let resorted = false;
+	const departed: MapSprite[] = [];
 	for (const sprite of artwork.sprites) {
 		const foot = sprite.foot;
 		if (!foot) {
@@ -4873,7 +4911,17 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 		const before = Coord_Cell(foot.lx, foot.ly);
 		if (sprite.rtti === "aircraft") {
 			const cruise = type && type.flight_level >= 0 ? type.flight_level : artwork.production.flight_level;
-			const moved = Fly_AI(foot, cruise);
+			const moved = Fly_AI(foot, {
+				cruise,
+				dropship: type?.is_dropship ?? false,
+				slowdown: type?.slowdown_distance ?? 500,
+			});
+			const cell = Coord_Cell(foot.lx, foot.ly);
+			if (!In_Radar_Cell(cell.x, cell.y, play) && sprite.loaner && !sprite.team) {
+				foot.left_map = true;
+				departed.push(sprite);
+				continue;
+			}
 			if (!moved) {
 				Resume_Waypoint(artwork, sprite, play, cells);
 				continue;
@@ -4883,10 +4931,7 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			sprite.y = placed.y;
 			sprite.ox = placed.ox;
 			sprite.oy = placed.oy;
-			if (foot.head) {
-				const facing = Direction_Facing({ x: foot.lx, y: foot.ly }, foot.head);
-				sprite.dir = Facing_Dir256(facing);
-			}
+			sprite.dir = Body_Dir256(foot);
 			if (type && !sprite.voxel) {
 				sprite.frame = unit_stand_frame(type, sprite.dir);
 			}
@@ -4955,6 +5000,10 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			}
 		}
 		Resume_Waypoint(artwork, sprite, play, cells);
+	}
+	for (const sprite of departed) {
+		Remove_Sprite(artwork, sprite);
+		resorted = true;
 	}
 	if (resorted) {
 		Sort_Sprites(artwork);

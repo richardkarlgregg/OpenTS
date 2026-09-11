@@ -69,6 +69,10 @@ export type FootState = {
 	start_body: number;
 	rot_body: number;
 	rotation_timer: number;
+	is_taking_off: boolean;
+	is_landing: boolean;
+	flight_level: number;
+	left_map: boolean;
 };
 
 export type ClaimHead = (cell: Point2D) => Point2D | null;
@@ -144,6 +148,10 @@ export function Make_Foot(cell: Point2D, max_speed: number, rot = 0): FootState 
 		start_body: 0,
 		rot_body: rot > 0 ? ((Math.min(rot, 127) << 8) << 16) >> 16 : 0,
 		rotation_timer: 0,
+		is_taking_off: false,
+		is_landing: false,
+		flight_level: 0,
+		left_map: false,
 	};
 }
 
@@ -210,6 +218,7 @@ export function Find_Path(
 }
 
 export function Assign_Destination(foot: FootState, cell: Point2D | null): void {
+	const same = !!cell && !!foot.dest && foot.dest.x === cell.x && foot.dest.y === cell.y;
 	foot.dest = cell ? { ...cell } : null;
 	foot.path = [];
 	foot.head = null;
@@ -219,8 +228,14 @@ export function Assign_Destination(foot: FootState, cell: Point2D | null): void 
 	foot.speed_accum = 0;
 	foot.is_driving = false;
 	foot.is_on_short_track = false;
-	foot.target_speed = 0;
-	foot.speed = 0;
+	if (foot.height_agl <= 0) {
+		foot.target_speed = 0;
+		foot.speed = 0;
+	}
+	if (cell && !same) {
+		foot.is_landing = false;
+		foot.left_map = false;
+	}
 }
 
 export function Movement_AI(
@@ -340,20 +355,3 @@ export function Movement_AI(
 	return true;
 }
 
-const FLY_CLIMB = 16;
-
-export function Fly_AI(foot: FootState, flight_level: number): boolean {
-	const air_enter: PathEnter = () => true;
-	const moved = Movement_AI(foot, air_enter, undefined, air_enter, null, 0);
-	if (foot.moving || foot.head) {
-		if (foot.height_agl < flight_level) {
-			foot.height_agl = Math.min(flight_level, foot.height_agl + FLY_CLIMB);
-		}
-		return true;
-	}
-	if (foot.height_agl > 0) {
-		foot.height_agl = Math.max(0, foot.height_agl - FLY_CLIMB);
-		return true;
-	}
-	return moved;
-}
