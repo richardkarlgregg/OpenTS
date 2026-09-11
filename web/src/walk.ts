@@ -58,6 +58,17 @@ export type FootState = {
 	current_path: number;
 	next_waypoint: number;
 	waypoint_target: Point2D | null;
+	track_number: number;
+	track_index: number;
+	speed_accum: number;
+	is_driving: boolean;
+	is_on_short_track: boolean;
+	target_speed: number;
+	speed: number;
+	desired_body: number;
+	start_body: number;
+	rot_body: number;
+	rotation_timer: number;
 };
 
 export type ClaimHead = (cell: Point2D) => Point2D | null;
@@ -106,7 +117,7 @@ export function Facing_Dir256(dir: number): number {
 	return ((dir & 7) * 32) & 255;
 }
 
-export function Make_Foot(cell: Point2D, max_speed: number): FootState {
+export function Make_Foot(cell: Point2D, max_speed: number, rot = 0): FootState {
 	const at = Cell_Center(cell);
 	return {
 		lx: at.x,
@@ -122,6 +133,17 @@ export function Make_Foot(cell: Point2D, max_speed: number): FootState {
 		current_path: PATH_NONE,
 		next_waypoint: 0,
 		waypoint_target: null,
+		track_number: -1,
+		track_index: -1,
+		speed_accum: 0,
+		is_driving: false,
+		is_on_short_track: false,
+		target_speed: 0,
+		speed: 0,
+		desired_body: 0,
+		start_body: 0,
+		rot_body: rot > 0 ? ((Math.min(rot, 127) << 8) << 16) >> 16 : 0,
+		rotation_timer: 0,
 	};
 }
 
@@ -192,6 +214,13 @@ export function Assign_Destination(foot: FootState, cell: Point2D | null): void 
 	foot.path = [];
 	foot.head = null;
 	foot.moving = cell !== null;
+	foot.track_number = -1;
+	foot.track_index = -1;
+	foot.speed_accum = 0;
+	foot.is_driving = false;
+	foot.is_on_short_track = false;
+	foot.target_speed = 0;
+	foot.speed = 0;
 }
 
 export function Movement_AI(

@@ -11,6 +11,52 @@
  ******************************************************************************/
 
 import { cc_retrieve } from "./ccfile";
+import {
+	Attach_Named_Tag,
+	Distribute_Tags,
+	Init_Triggers,
+	Logic_AI,
+	Read_CellTags,
+	Read_Locals,
+	Read_Tutorial,
+	Read_Waypoints,
+	Spring_Cell_Enter,
+	Spring_Destroyed,
+	Spring_House_Tags,
+	TagTypeClass,
+	TriggerTypeClass,
+	Set_Local,
+	type TagClass,
+} from "./trigger";
+import {
+	Ensure_Default_Script,
+	Init_Teams,
+	ScriptTypeClass,
+	TaskForceClass,
+	TeamClass,
+	TeamTypeClass,
+	Teams,
+	TMISSION_ATT_WAYPT,
+	TMISSION_ATTACK,
+	TMISSION_CHANGE_HOUSE,
+	TMISSION_CLEAR_LOCAL,
+	TMISSION_DO,
+	TMISSION_FORCE_FACING,
+	TMISSION_GOTO_SHROUD,
+	TMISSION_GUARD,
+	TMISSION_LOOP,
+	TMISSION_LOSE,
+	TMISSION_MOVE,
+	TMISSION_MOVECELL,
+	TMISSION_PANIC,
+	TMISSION_PATROL,
+	TMISSION_PLAY_SPEECH,
+	TMISSION_SET_LOCAL,
+	TMISSION_UNLOAD,
+	TMISSION_UNPANIC,
+	TMISSION_WIN,
+	type PendingTeam,
+} from "./team";
 import { FactoryClass, Time_To_Build, type FactoryObject } from "./factory";
 import type { GameDirectory } from "./files";
 import {
@@ -18,9 +64,14 @@ import {
 	Assign_Campaign_Player,
 	Do_HouseTypes,
 	HouseClass,
+	House_From_HousesType,
 	House_From_Name,
 	Houses,
 	HOUSE_NONE,
+	SOURCE_AIR,
+	SOURCE_EAST,
+	SOURCE_SOUTH,
+	SOURCE_WEST,
 	Init_Houses,
 	Init_HouseTypes,
 	PlayerPtr,
@@ -66,7 +117,7 @@ import {
 	type CameoKind,
 	type SidebarStrips,
 } from "./sidebar";
-import { TICKS_PER_MINUTE } from "./stimer";
+import { TICKS_PER_MINUTE, TICKS_PER_SECOND } from "./stimer";
 import { build_hicolor_pixel } from "./surface";
 import { theater_from_name, type TheaterSeed } from "./theater";
 import { read_vxl, type VoxelModel } from "./voxlib";
@@ -102,7 +153,8 @@ import {
 	type FootState,
 	type PathEnter,
 } from "./walk";
-import { Build_Path_Graph, Threat_Region, type PathGraph, type TubePath } from "./zone";
+import { Body_Dir256, Drive_AI, Set_Drive_Facing } from "./drive";
+import { Build_Path_Graph, graph_cell, Threat_Region, type PathGraph, type TubePath } from "./zone";
 
 const MAP_CELL_W = 512;
 const MAP_CELL_H = 512;
@@ -127,6 +179,11 @@ const STOPPING_COORD = [
 	{ x: (3 * CELL_LEPTON) / 4, y: (3 * CELL_LEPTON) / 4 },
 ];
 const INFANTRY_SPOT_MASK = 0x1c;
+const HARVEST_LOOKING = 0;
+const HARVEST_HARVESTING = 1;
+const HARVEST_FINDHOME = 2;
+const HARVEST_DUMPING = 3;
+const HARVESTER_LOAD_STAGES = 9;
 const SPOT_SEQUENCE: readonly (readonly number[])[] = [
 	[1, 2, 3, 4],
 	[0, 2, 3, 4],
@@ -216,6 +273,21 @@ export type MapSprite = {
 	arm: number;
 	ammo: number;
 	attack_mission: boolean;
+	tag: TagClass | null;
+	team: TeamClass | null;
+	cargo: MapSprite[];
+	loaner: boolean;
+	storage: number[];
+	harvest: HarvestState | null;
+	tib: number;
+};
+
+export type HarvestState = {
+	status: number;
+	stage: number;
+	storage: number[];
+	archive: Point2D | null;
+	dock: MapSprite | null;
 };
 
 export type BulletClass = {
@@ -281,6 +353,22 @@ export type MapArtwork = {
 	bullets: BulletClass[];
 	min_damage: number;
 	max_damage: number;
+	waypoints: Map<number, Point2D>;
+	cell_tags: Map<string, TagClass>;
+	message: string;
+	message_timer: number;
+	center_on: Point2D | null;
+	input_locked: boolean;
+	ended: "" | "win" | "lose";
+	reveal_radius: number;
+	is_global_changed: boolean;
+	shroud_map: ShroudMap | null;
+	pending_teams: PendingTeam[];
+	tiberiums: TiberiumType[];
+	harvester_load_rate: number;
+	harvester_dump_rate: number;
+	tiberium_long_scan: number;
+	tiberium_short_scan: number;
 };
 
 export type PendingPlace = {
@@ -389,6 +477,7 @@ export type ShapeType = {
 	cost: number;
 	adjacent: number;
 	speed: number;
+	rot: number;
 	gdi_barracks: boolean;
 	nod_barracks: boolean;
 	exit_coord: Point2D;
@@ -420,6 +509,13 @@ export type ShapeType = {
 	ammo: number;
 	legal_target: boolean;
 	immune: boolean;
+	passengers: number;
+	heap_id: number;
+	free_unit: string;
+	harvester: boolean;
+	refinery: boolean;
+	capacity: number;
+	dock: string[];
 };
 
 type TiberiumType = {
@@ -428,6 +524,7 @@ type TiberiumType = {
 	start: number;
 	variety: number;
 	ramp: number;
+	value: number;
 };
 
 function is_bridge_name(name: string, graphic: string): boolean {
@@ -692,6 +789,12 @@ function Sort_Sprites(artwork: MapArtwork): void {
 	artwork.sprites.sort(compare_sprites);
 }
 
+function enter_cell(artwork: MapArtwork, shroud: ShroudMap | null, sprite: MapSprite, cell: Point2D): void {
+	const graph = artwork.path_graph;
+	const under = graph ? (graph_cell(graph, cell)?.under_bridge ?? false) : false;
+	Spring_Cell_Enter(artwork, shroud, sprite, cell, under);
+}
+
 function Look(artwork: MapArtwork, sprite: MapSprite, shroud: ShroudMap | null): void {
 	if (!shroud || !sprite.owned) {
 		return;
@@ -719,9 +822,28 @@ function read_tiberiums(rules: INIClass, overlays: OverlayType[]): TiberiumType[
 			start: tiberium_overlay_start(image, overlays),
 			variety: 12,
 			ramp: large ? 0 : 8,
+			value: Math.max(0, rules.get_int(name, "Value", 0)),
 		});
 	}
 	return types;
+}
+
+function tiberium_slot(id: number, types: TiberiumType[]): number {
+	for (let i = 0; i < types.length; i++) {
+		const type = types[i]!;
+		if (id >= type.start && id < type.start + type.variety + type.ramp) {
+			return i;
+		}
+	}
+	return types.length > 0 ? 0 : -1;
+}
+
+function scan_cells(rules: INIClass, section: string, entry: string, fallback: number): number {
+	const raw = rules.get_int(section, entry, fallback * CELL_LEPTON);
+	if (raw >= CELL_LEPTON) {
+		return Math.max(1, Math.trunc(raw / CELL_LEPTON));
+	}
+	return Math.max(1, raw || fallback);
 }
 
 function tiberium_color(id: number, types: TiberiumType[]): string {
@@ -784,6 +906,13 @@ function make_sprite(
 		arm: 0,
 		ammo: -1,
 		attack_mission: false,
+		tag: null,
+		team: null,
+		cargo: [],
+		loaner: false,
+		storage: [],
+		harvest: null,
+		tib: -1,
 		...extra,
 	};
 }
@@ -941,6 +1070,18 @@ function theater_filename(name: string, letter: string): string {
 	return name;
 }
 
+function typed_shapes(rules: INIClass, art: INIClass, section: string): Map<string, ShapeType> {
+	const table = new Map<string, ShapeType>();
+	const names = list_types(rules, section);
+	for (let i = 0; i < names.length; i++) {
+		const name = names[i]!;
+		const type = read_shape_type(rules, art, name);
+		type.heap_id = i;
+		table.set(name.toUpperCase(), type);
+	}
+	return table;
+}
+
 function list_types(ini: INIClass, section: string): string[] {
 	const names: string[] = [];
 	const count = ini.entry_count(section);
@@ -1046,6 +1187,7 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		cost: rules.get_int(name, "Cost", 0),
 		adjacent: rules.get_int(name, "Adjacent", 3),
 		speed: Scale_To_256(rules.get_int(name, "Speed", 0)),
+		rot: rules.get_int(name, "ROT", 0),
 		gdi_barracks: rules.get_bool(name, "GDIBarracks", false),
 		nod_barracks: rules.get_bool(name, "NODBarracks", false),
 		exit_coord: rules.get_point(name, "ExitCoord", { x: 0, y: 0 }),
@@ -1078,6 +1220,13 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		ammo: rules.get_int(name, "Ammo", -1),
 		legal_target: rules.get_bool(name, "LegalTarget", true),
 		immune: rules.get_bool(name, "Immune", false),
+		passengers: rules.get_int(name, "Passengers", 0),
+		heap_id: 0,
+		free_unit: rules.get_string(name, "FreeUnit", ""),
+		harvester: rules.get_bool(name, "Harvester", false),
+		refinery: rules.get_bool(name, "Refinery", false),
+		capacity: rules.get_int(name, "Storage", 0),
+		dock: csv(rules.get_string(name, "Dock", "")),
 	};
 }
 
@@ -1437,6 +1586,7 @@ function parse_overlay_pack(
 				scheme: type.tiberium ? tiberium_color(id, tiberiums) : "",
 				bright: type.tiberium ? "day" : type.wall ? "object" : "tile",
 				bridge: type.bridge,
+				tib: type.tiberium ? tiberium_slot(id, tiberiums) : -1,
 			}),
 		);
 	}
@@ -1479,6 +1629,7 @@ type PlacedObject = {
 	sub: number;
 	health: number;
 	veteran: boolean;
+	tag: string;
 };
 
 function token_int(parts: string[], index: number, fallback: number): number {
@@ -1517,6 +1668,28 @@ function spawn_health(ratio_256: number, max: number, keep_alive: boolean): { st
 	return { strength, health_ratio: Get_Health_Ratio(strength, max) };
 }
 
+function Just_Built(house: HouseClass | null, sprite: MapSprite, type: ShapeType): void {
+	if (!house) {
+		return;
+	}
+	switch (sprite.rtti) {
+		case "building":
+			house.JustBuiltStructure = type.heap_id;
+			break;
+		case "infantry":
+			house.JustBuiltInfantry = type.heap_id;
+			break;
+		case "unit":
+			house.JustBuiltUnit = type.heap_id;
+			break;
+		case "aircraft":
+			house.JustBuiltAircraft = type.heap_id;
+			break;
+		default:
+			break;
+	}
+}
+
 function Considered_Vehicle(type: ShapeType | null): boolean {
 	if (!type || !type.undeploys_into) {
 		return false;
@@ -1524,7 +1697,15 @@ function Considered_Vehicle(type: ShapeType | null): boolean {
 	return !type.construction_yard;
 }
 
-function parse_placed(line: string, infantry: boolean): PlacedObject | null {
+function token_tag(parts: string[], index: number): string {
+	const name = parts[index]?.trim() ?? "";
+	if (!name || name.toUpperCase() === "NONE" || name.toUpperCase() === "<NONE>") {
+		return "";
+	}
+	return name;
+}
+
+function parse_placed(line: string, infantry: boolean, tag_index = infantry ? 8 : 7): PlacedObject | null {
 	const parts = line.split(",");
 	if (parts.length < 5) {
 		return null;
@@ -1547,9 +1728,20 @@ function parse_placed(line: string, infantry: boolean): PlacedObject | null {
 			dir: token_int(parts, 7, 0),
 			health,
 			veteran: token_int(parts, 9, 0) !== 0,
+			tag: token_tag(parts, tag_index),
 		};
 	}
-	return { house, name, x, y, dir: token_int(parts, 5, 0), sub: 0, health, veteran: token_int(parts, 8, 0) !== 0 };
+	return {
+		house,
+		name,
+		x,
+		y,
+		dir: token_int(parts, 5, 0),
+		sub: 0,
+		health,
+		veteran: token_int(parts, 8, 0) !== 0,
+		tag: token_tag(parts, tag_index),
+	};
 }
 
 function parse_infantry(
@@ -1561,7 +1753,7 @@ function parse_infantry(
 	const sprites: MapSprite[] = [];
 	const count = ini.entry_count("Infantry");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_placed(ini.get_string("Infantry", ini.get_entry("Infantry", i)), true);
+		const parsed = parse_placed(ini.get_string("Infantry", ini.get_entry("Infantry", i)), true, 8);
 		if (!parsed) {
 			continue;
 		}
@@ -1605,6 +1797,7 @@ function parse_infantry(
 			sprite.oy = placed.oy;
 		}
 		sprites.push(sprite);
+		Attach_Named_Tag(sprite, parsed.tag);
 	}
 	return sprites;
 }
@@ -1620,7 +1813,7 @@ function parse_units(
 	const sprites: MapSprite[] = [];
 	const count = ini.entry_count(section);
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_placed(ini.get_string(section, ini.get_entry(section, i)), false);
+		const parsed = parse_placed(ini.get_string(section, ini.get_entry(section, i)), false, 7);
 		if (!parsed) {
 			continue;
 		}
@@ -1646,7 +1839,8 @@ function parse_units(
 			veteran: parsed.veteran,
 			type_name: type.name,
 			ammo: type.ammo,
-			foot: Make_Foot({ x: parsed.x, y: parsed.y }, type.speed),
+			foot: unit_foot(type, { x: parsed.x, y: parsed.y }, parsed.dir),
+			harvest: harvest_state(type, 4),
 		};
 		if (type.voxel) {
 			const sprite = make_sprite(parsed.x, parsed.y, [], "unit", layer, {
@@ -1656,6 +1850,7 @@ function parse_units(
 			});
 			owner.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
 			sprites.push(sprite);
+			Attach_Named_Tag(sprite, parsed.tag);
 			continue;
 		}
 		const files = object_files(type, seed);
@@ -1668,6 +1863,7 @@ function parse_units(
 		});
 		owner.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
 		sprites.push(sprite);
+		Attach_Named_Tag(sprite, parsed.tag);
 	}
 	return sprites;
 }
@@ -1690,10 +1886,11 @@ function parse_structures(
 		owned: boolean;
 		house: number;
 		owner: HouseClass;
+		tag: string;
 	}[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false);
+		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false, 6);
 		if (!parsed) {
 			continue;
 		}
@@ -1716,6 +1913,7 @@ function parse_structures(
 			owned: owner === PlayerPtr,
 			house: owner.HeapID,
 			owner,
+			tag: parsed.tag,
 		});
 	}
 	const sprites: MapSprite[] = [];
@@ -1750,7 +1948,7 @@ function parse_structures(
 			continue;
 		}
 		sprites.push(
-			...structure_sprites(item.x, item.y, item.type, seed, art, item.scheme, item.blip, item.owned, item.house, item.owner, item.health),
+			...structure_sprites(item.x, item.y, item.type, seed, art, item.scheme, item.blip, item.owned, item.house, item.owner, item.health, item.tag),
 		);
 	}
 	return sprites;
@@ -1768,6 +1966,7 @@ function structure_sprites(
 	house = HOUSE_NONE,
 	owner: HouseClass | null = null,
 	health = 256,
+	tag = "",
 ): MapSprite[] {
 	const sprites: MapSprite[] = [];
 	const files = object_files(type, seed);
@@ -1790,8 +1989,10 @@ function structure_sprites(
 		type_name: type.name,
 		ammo: type.ammo,
 		gate: type.gate ? Make_Gate(type) : null,
+		storage: type.capacity > 0 ? empty_storage(4) : [],
 	});
 	sprites.push(building);
+	Attach_Named_Tag(building, tag);
 	if (owner) {
 		owner.Tracking_Add(building.rtti, building.type_name, Considered_Vehicle(type), type.insignificant);
 	}
@@ -2143,21 +2344,11 @@ export async function load_map_artwork(
 			schemes.set(entry.toUpperCase(), scheme_palette(unit_palette, hsv.h, hsv.s, hsv.v));
 		}
 	}
-	const buildings = new Map(
-		list_types(rules_ini, "BuildingTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
-	);
-	const terrains = new Map(
-		list_types(rules_ini, "TerrainTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
-	);
-	const infantry = new Map(
-		list_types(rules_ini, "InfantryTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
-	);
-	const units = new Map(
-		list_types(rules_ini, "VehicleTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
-	);
-	const aircraft = new Map(
-		list_types(rules_ini, "AircraftTypes").map((name) => [name.toUpperCase(), read_shape_type(rules_ini, art_ini, name)]),
-	);
+	const buildings = typed_shapes(rules_ini, art_ini, "BuildingTypes");
+	const terrains = typed_shapes(rules_ini, art_ini, "TerrainTypes");
+	const infantry = typed_shapes(rules_ini, art_ini, "InfantryTypes");
+	const units = typed_shapes(rules_ini, art_ini, "VehicleTypes");
+	const aircraft = typed_shapes(rules_ini, art_ini, "AircraftTypes");
 
 	Init_HouseTypes();
 	Do_HouseTypes(rules_ini);
@@ -2165,6 +2356,17 @@ export async function load_map_artwork(
 	Init_Houses();
 	HouseClass.Read_All(ini, rules_ini.get_int("IQ", "MaxIQLevels", 5), 1);
 	Assign_Campaign_Player(ini);
+	Init_Teams();
+	TaskForceClass.Read_All(ini);
+	ScriptTypeClass.Read_All(ini);
+	TeamTypeClass.Read_All(ini);
+	Init_Triggers();
+	TriggerTypeClass.Read_All(ini);
+	TagTypeClass.Read_All(ini);
+	Read_Locals(ini);
+	const tutorial = await load_ini(directory, "TUTORIAL.INI");
+	Read_Tutorial(tutorial, ini);
+	const waypoints = Read_Waypoints(ini);
 	const player_house = PlayerPtr;
 	const player = player_house?.Class.Name() || ini.get_string("Basic", "Player", "GDI") || "GDI";
 
@@ -2417,7 +2619,26 @@ export async function load_map_artwork(
 		bullets: [],
 		min_damage: combat.min_damage,
 		max_damage: combat.max_damage,
+		waypoints,
+		cell_tags: new Map(),
+		message: "",
+		message_timer: 0,
+		center_on: null,
+		input_locked: false,
+		ended: "",
+		reveal_radius: rules_ini.get_int("General", "RevealTriggerRadius", 5),
+		is_global_changed: false,
+		shroud_map: null,
+		pending_teams: [],
+		tiberiums,
+		harvester_load_rate: Math.max(1, rules_ini.get_int("General", "HarvesterLoadRate", 2)),
+		harvester_dump_rate: Math.max(1, Math.round(rules_ini.get_float("General", "HarvesterDumpRate", 0.016) * TICKS_PER_MINUTE) | 0),
+		tiberium_long_scan: scan_cells(rules_ini, "AI", "TiberiumFarScan", 32),
+		tiberium_short_scan: scan_cells(rules_ini, "AI", "TiberiumNearScan", 6),
 	};
+	Read_CellTags(ini, artwork);
+	Distribute_Tags();
+	log(`Triggers ${ini.entry_count("Triggers")}, tags ${ini.entry_count("Tags")}, cell tags ${artwork.cell_tags.size}, teams ${ini.entry_count("TeamTypes")}.`);
 	for (const sprite of artwork.sprites) {
 		if (sprite.rtti === "building") {
 			Apply_Health_Status(artwork, sprite);
@@ -2426,10 +2647,704 @@ export async function load_map_artwork(
 	return artwork;
 }
 
+export function LogicClass_AI(artwork: MapArtwork): void {
+	Logic_AI(artwork, artwork.shroud_map);
+}
+
+export function Team_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shroud: ShroudMap | null): void {
+	for (const team of Teams.slice()) {
+		prune_team(artwork, team);
+		recruit_team(artwork, team);
+		if (!team.Recalc_Strength()) {
+			continue;
+		}
+		if (!team.IsMoving && (team.IsFullStrength || team.IsForcedActive)) {
+			team.Flag_Into_Action();
+		}
+		if (!team.IsMoving) {
+			continue;
+		}
+		let first = false;
+		if (team.IsNextMission) {
+			first = true;
+			team.IsNextMission = false;
+			team.Script.Next_Mission();
+			team.Target = null;
+			team.MissionTarget = null;
+			team.AttackTarget = null;
+			if (!team.Script.Has_Missions_Remaining()) {
+				finish_loaners(artwork, team);
+				team.Disband();
+				continue;
+			}
+		}
+		if (team.TimeOut > 0) {
+			team.TimeOut--;
+		}
+		run_team_mission(artwork, team, play, cells, shroud, first);
+	}
+}
+
+export async function Deliver_Pending_Teams(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<void> {
+	const batch = artwork.pending_teams.splice(0, artwork.pending_teams.length);
+	for (const pending of batch) {
+		await Place_Reinforcement(directory, artwork, pending, play, cells, shroud);
+	}
+}
+
+function team_members(team: TeamClass): MapSprite[] {
+	return team.Member as MapSprite[];
+}
+
+function member_carried(team: TeamClass, sprite: MapSprite): boolean {
+	return team_members(team).some((other) => other.cargo.includes(sprite));
+}
+
+function prune_team(artwork: MapArtwork, team: TeamClass): void {
+	for (const member of team_members(team).slice()) {
+		if (member.strength <= 0) {
+			team.Remove(member);
+			continue;
+		}
+		if (artwork.sprites.includes(member) || member_carried(team, member)) {
+			continue;
+		}
+		team.Remove(member);
+	}
+}
+
+function recruit_team(artwork: MapArtwork, team: TeamClass): void {
+	const force = team.Class.TaskForce;
+	if (!force) {
+		return;
+	}
+	const can =
+		(!team.IsMoving || (!team.IsFullStrength && team.Class.IsReinforcable)) &&
+		(!team.House.Is_Human_Player() || !team.IsHasBeen);
+	if (!can) {
+		return;
+	}
+	for (let index = 0; index < force.ClassCount; index++) {
+		const slot = force.Members[index];
+		if (!slot || (team.Quantity[index] ?? 0) >= slot.Quantity) {
+			continue;
+		}
+		for (const sprite of artwork.sprites) {
+			if (!sprite.foot || sprite.team || sprite.house !== team.House.HeapID) {
+				continue;
+			}
+			if ((team.Quantity[index] ?? 0) >= slot.Quantity) {
+				break;
+			}
+			if (sprite.type_name.toUpperCase() !== slot.ClassName) {
+				continue;
+			}
+			team.Add(sprite);
+		}
+	}
+}
+
+function playing_members(artwork: MapArtwork, team: TeamClass): MapSprite[] {
+	return team_members(team).filter((member) => artwork.sprites.includes(member));
+}
+
+function member_arrived(sprite: MapSprite): boolean {
+	const foot = sprite.foot;
+	if (!foot) {
+		return true;
+	}
+	return !foot.dest && !foot.moving && !foot.head && !foot.is_driving;
+}
+
+function team_arrived(artwork: MapArtwork, team: TeamClass): boolean {
+	const live = playing_members(artwork, team);
+	return live.length === 0 || live.every((member) => member_arrived(member));
+}
+
+function occupier_at(artwork: MapArtwork, cell: Point2D): MapSprite | null {
+	let found: MapSprite | null = null;
+	for (const sprite of artwork.sprites) {
+		if (sprite.strength <= 0 || !sprite.rtti) {
+			continue;
+		}
+		if (sprite.x === cell.x && sprite.y === cell.y) {
+			found = sprite;
+		}
+	}
+	return found;
+}
+
+function assign_team_move(artwork: MapArtwork, team: TeamClass, cell: Point2D, play: Rect, cells: Set<string>): void {
+	team.MissionTarget = { ...cell };
+	team.Target = { ...cell };
+	for (const member of playing_members(artwork, team)) {
+		if (!member.foot) {
+			continue;
+		}
+		let dest = cell;
+		if (member.rtti !== "aircraft" && !Can_Move_To(artwork, member, dest, play, cells)) {
+			dest = nearby_enter(artwork, member, dest, play, cells) ?? dest;
+		}
+		Assign_Destination(member.foot, dest);
+		Assign_Target(member, null);
+	}
+}
+
+function finish_loaners(artwork: MapArtwork, team: TeamClass): void {
+	for (const member of team_members(team).slice()) {
+		if (member.loaner) {
+			Remove_Sprite(artwork, member);
+		}
+	}
+}
+
+function run_team_mission(
+	artwork: MapArtwork,
+	team: TeamClass,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+	first: boolean,
+): void {
+	const mission = team.Script.Get_Current_Mission();
+	switch (mission.Mission) {
+		case TMISSION_MOVE:
+		case TMISSION_PATROL: {
+			if (first) {
+				const cell = artwork.waypoints.get(mission.Data);
+				if (cell) {
+					assign_team_move(artwork, team, cell, play, cells);
+				} else {
+					team.IsNextMission = true;
+				}
+			} else if (team_arrived(artwork, team)) {
+				team.IsNextMission = true;
+			}
+			break;
+		}
+		case TMISSION_MOVECELL: {
+			if (first) {
+				const cell = { x: mission.Data % 1000, y: Math.trunc(mission.Data / 1000) };
+				assign_team_move(artwork, team, cell, play, cells);
+			} else if (team_arrived(artwork, team)) {
+				team.IsNextMission = true;
+			}
+			break;
+		}
+		case TMISSION_ATT_WAYPT:
+		case TMISSION_ATTACK: {
+			if (first) {
+				const cell = artwork.waypoints.get(mission.Data);
+				if (!cell) {
+					team.IsNextMission = true;
+					break;
+				}
+				const occupant = occupier_at(artwork, cell);
+				if (occupant && occupant.strength > 0 && !team.House.Is_Ally_House(occupant.house)) {
+					team.AttackTarget = occupant;
+					for (const member of playing_members(artwork, team)) {
+						Assign_Target(member, occupant, true);
+					}
+				} else {
+					assign_team_move(artwork, team, cell, play, cells);
+				}
+			} else if (team.AttackTarget) {
+				const target = team.AttackTarget as MapSprite;
+				if (target.strength <= 0 || !artwork.sprites.includes(target)) {
+					team.AttackTarget = null;
+					team.IsNextMission = true;
+				}
+			} else if (team_arrived(artwork, team)) {
+				team.IsNextMission = true;
+			}
+			break;
+		}
+		case TMISSION_GUARD:
+			if (first) {
+				team.TimeOut = TICKS_PER_SECOND * mission.Data;
+				for (const member of playing_members(artwork, team)) {
+					if (member.foot) {
+						Assign_Destination(member.foot, null);
+					}
+					Assign_Target(member, null);
+				}
+			}
+			if (team.TimeOut <= 0) {
+				team.IsNextMission = true;
+			}
+			break;
+		case TMISSION_UNLOAD:
+			if (unload_team(artwork, team, play, cells, shroud, mission.Data)) {
+				team.IsNextMission = true;
+			}
+			break;
+		case TMISSION_LOOP:
+			team.Script.Set_Line(mission.Data - 2);
+			team.IsNextMission = true;
+			break;
+		case TMISSION_SET_LOCAL:
+			Set_Local(mission.Data, true);
+			artwork.is_global_changed = true;
+			team.IsNextMission = true;
+			break;
+		case TMISSION_CLEAR_LOCAL:
+			Set_Local(mission.Data, false);
+			artwork.is_global_changed = true;
+			team.IsNextMission = true;
+			break;
+		case TMISSION_CHANGE_HOUSE: {
+			const house = House_From_HousesType(mission.Data);
+			if (house) {
+				for (const member of team_members(team).slice()) {
+					capture_sprite(artwork, member, house);
+				}
+			}
+			team.IsNextMission = true;
+			break;
+		}
+		case TMISSION_WIN:
+			artwork.ended = "win";
+			artwork.message = "Mission accomplished";
+			artwork.message_timer = TICKS_PER_MINUTE;
+			team.IsNextMission = true;
+			break;
+		case TMISSION_LOSE:
+			artwork.ended = "lose";
+			artwork.message = "Mission failed";
+			artwork.message_timer = TICKS_PER_MINUTE;
+			team.IsNextMission = true;
+			break;
+		case TMISSION_GOTO_SHROUD:
+			if (first && shroud) {
+				const leader = playing_members(artwork, team)[0];
+				if (leader) {
+					const dest = nearby_shroud_cell(shroud, { x: leader.x, y: leader.y }, play, cells);
+					if (dest) {
+						assign_team_move(artwork, team, dest, play, cells);
+						break;
+					}
+				}
+			}
+			if (!first && !team_arrived(artwork, team)) {
+				break;
+			}
+			team.IsNextMission = true;
+			break;
+		case TMISSION_DO:
+		case TMISSION_PANIC:
+		case TMISSION_UNPANIC:
+		case TMISSION_FORCE_FACING:
+		case TMISSION_PLAY_SPEECH:
+			team.IsNextMission = true;
+			break;
+		default:
+			team.IsNextMission = true;
+			break;
+	}
+	for (const member of team_members(team).slice()) {
+		if (
+			member.loaner &&
+			team.Unloaded &&
+			mission.Mission !== TMISSION_UNLOAD &&
+			artwork.sprites.includes(member) &&
+			member_arrived(member)
+		) {
+			Remove_Sprite(artwork, member);
+		}
+	}
+}
+
+function unload_team(
+	artwork: MapArtwork,
+	team: TeamClass,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+	mode: number,
+): boolean {
+	let busy = false;
+	for (const transport of playing_members(artwork, team)) {
+		if (transport.cargo.length === 0) {
+			continue;
+		}
+		busy = true;
+		const origin = { x: transport.x, y: transport.y };
+		const passengers = transport.cargo.splice(0, transport.cargo.length);
+		for (const passenger of passengers) {
+			const placed = place_unloaded(artwork, passenger, origin, play, cells);
+			if (!placed) {
+				continue;
+			}
+			artwork.sprites.push(placed);
+			Look(artwork, placed, shroud);
+			if (mode === 1 || mode === 3) {
+				team.Remove(placed);
+			}
+		}
+	}
+	if (busy) {
+		Sort_Sprites(artwork);
+		return false;
+	}
+	if (mode === 2 || mode === 3) {
+		for (const member of playing_members(artwork, team).slice()) {
+			const type = type_for_sprite(artwork, member);
+			if (type && type.passengers > 0) {
+				team.Remove(member);
+			}
+		}
+	}
+	team.Unloaded = true;
+	return true;
+}
+
+function place_unloaded(
+	artwork: MapArtwork,
+	sprite: MapSprite,
+	origin: Point2D,
+	play: Rect,
+	cells: Set<string>,
+): MapSprite | null {
+	const rtti = sprite.rtti === "unit" ? "unit" : "infantry";
+	const cell = nearby_spawn_cell(artwork, origin, rtti, play, cells) ?? origin;
+	const center = Cell_Center(cell);
+	if (!sprite.foot) {
+		sprite.foot = Make_Foot(cell, 1);
+	}
+	sprite.foot.lx = center.x;
+	sprite.foot.ly = center.y;
+	Assign_Destination(sprite.foot, null);
+	const placed = Apply_Coord(sprite.foot);
+	sprite.x = placed.x;
+	sprite.y = placed.y;
+	sprite.ox = placed.ox;
+	sprite.oy = placed.oy;
+	if (sprite.rtti === "infantry") {
+		const claimed = Closest_Free_Spot(artwork.sprites, sprite, cell, center, artwork.sprites.length);
+		if (claimed && sprite.foot) {
+			sprite.foot.lx = claimed.x;
+			sprite.foot.ly = claimed.y;
+			const spot = Apply_Coord(sprite.foot);
+			sprite.x = spot.x;
+			sprite.y = spot.y;
+			sprite.ox = spot.ox;
+			sprite.oy = spot.oy;
+		}
+	}
+	return sprite;
+}
+
+function nearby_shroud_cell(shroud: ShroudMap, from: Point2D, play: Rect, cells: Set<string>): Point2D | null {
+	for (let rad = 1; rad <= 12; rad++) {
+		for (let y = -rad; y <= rad; y++) {
+			for (let x = -rad; x <= rad; x++) {
+				if (Math.abs(x) !== rad && Math.abs(y) !== rad) {
+					continue;
+				}
+				const cell = { x: from.x + x, y: from.y + y };
+				if (!In_Radar_Cell(cell.x, cell.y, play) || !cells.has(`${cell.x},${cell.y}`)) {
+					continue;
+				}
+				if (!shroud.IsMapped(cell.x, cell.y)) {
+					return cell;
+				}
+			}
+		}
+	}
+	return null;
+}
+
+function capture_sprite(artwork: MapArtwork, sprite: MapSprite, house: HouseClass): void {
+	const type = type_for_sprite(artwork, sprite);
+	const old = Houses[sprite.house];
+	if (old && sprite.rtti) {
+		old.Tracking_Remove(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type?.insignificant ?? false);
+	}
+	sprite.house = house.HeapID;
+	sprite.owned = house === PlayerPtr;
+	sprite.scheme = type?.terrain_palette ? "" : house.Scheme;
+	sprite.blip = house_spawn_blip(artwork, house);
+	if (type) {
+		house.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
+	}
+}
+
+function house_spawn_blip(artwork: MapArtwork, house: HouseClass): number {
+	if (house === PlayerPtr) {
+		return artwork.production.blip;
+	}
+	const found = artwork.sprites.find((sprite) => sprite.house === house.HeapID && sprite.blip);
+	return found?.blip ?? 0;
+}
+
+function resolve_member_type(
+	artwork: MapArtwork,
+	name: string,
+): { type: ShapeType; rtti: "infantry" | "unit" | "aircraft" } | null {
+	const key = name.toUpperCase();
+	const infantry = artwork.production.infantry.get(key);
+	if (infantry) {
+		return { type: infantry, rtti: "infantry" };
+	}
+	const unit = artwork.production.units.get(key);
+	if (unit) {
+		return { type: unit, rtti: "unit" };
+	}
+	const aircraft = artwork.production.aircraft.get(key);
+	if (aircraft) {
+		return { type: aircraft, rtti: "aircraft" };
+	}
+	return null;
+}
+
+function nearby_spawn_cell(
+	artwork: MapArtwork,
+	origin: Point2D,
+	rtti: "infantry" | "unit" | "aircraft",
+	play: Rect,
+	cells: Set<string>,
+): Point2D | null {
+	if (rtti === "aircraft") {
+		return origin;
+	}
+	if (cell_clear_for(artwork, origin, rtti, play, cells)) {
+		return origin;
+	}
+	for (let rad = 1; rad <= 8; rad++) {
+		for (let y = -rad; y <= rad; y++) {
+			for (let x = -rad; x <= rad; x++) {
+				if (Math.abs(x) !== rad && Math.abs(y) !== rad) {
+					continue;
+				}
+				const cell = { x: origin.x + x, y: origin.y + y };
+				if (cell_clear_for(artwork, cell, rtti, play, cells)) {
+					return cell;
+				}
+			}
+		}
+	}
+	return origin;
+}
+
+function reinforcement_edge(origin: Point2D, house: HouseClass, play: Rect, cells: Set<string>): Point2D {
+	const edge = house.Control.Edge;
+	if (edge === SOURCE_AIR) {
+		return origin;
+	}
+	let best = origin;
+	let best_rank = Number.POSITIVE_INFINITY;
+	for (const key of cells) {
+		const comma = key.indexOf(",");
+		const x = Number.parseInt(key.slice(0, comma), 10);
+		const y = Number.parseInt(key.slice(comma + 1), 10);
+		if (!In_Radar_Cell(x, y, play)) {
+			continue;
+		}
+		let score = 0;
+		if (edge === SOURCE_SOUTH) {
+			score = -y;
+		} else if (edge === SOURCE_EAST) {
+			score = -x;
+		} else if (edge === SOURCE_WEST) {
+			score = x;
+		} else {
+			score = y;
+		}
+		const dist = Math.abs(x - origin.x) + Math.abs(y - origin.y);
+		const rank = score * 10000 + dist;
+		if (rank < best_rank) {
+			best_rank = rank;
+			best = { x, y };
+		}
+	}
+	return best;
+}
+
+async function Place_Reinforcement(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	pending: PendingTeam,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<void> {
+	const type = TeamTypeClass.From_Name(pending.team);
+	if (!type || !type.TaskForce || !type.House || type.TaskForce.ClassCount === 0) {
+		return;
+	}
+	Ensure_Default_Script(type);
+	const drop_pod =
+		type.IsDroppod && type.TaskForce.Has_Only_Infantry((name) => artwork.production.infantry.has(name.toUpperCase()));
+	const origin =
+		pending.kind === "special" && pending.waypoint >= 0
+			? (artwork.waypoints.get(pending.waypoint) ?? type.Get_Origin(artwork.waypoints))
+			: type.Get_Origin(artwork.waypoints);
+	if (!origin) {
+		return;
+	}
+	const atwaypoint = pending.kind === "special";
+	const team = new TeamClass(type, type.House);
+	team.Force_Active();
+	const air = team.Has_Air_Transport(
+		(name) => artwork.production.aircraft.has(name.toUpperCase()),
+		(name) => artwork.production.aircraft.get(name.toUpperCase())?.passengers ?? 0,
+	);
+	const transports: MapSprite[] = [];
+	const riders: MapSprite[] = [];
+	let drop_cell = { ...origin };
+	for (let index = 0; index < type.TaskForce.ClassCount; index++) {
+		const slot = type.TaskForce.Members[index];
+		if (!slot) {
+			continue;
+		}
+		const resolved = resolve_member_type(artwork, slot.ClassName);
+		if (!resolved) {
+			continue;
+		}
+		for (let n = 0; n < slot.Quantity; n++) {
+			const sprite = make_team_sprite(artwork, resolved.type, resolved.rtti, drop_cell, type.House);
+			let born: MapSprite | undefined;
+			if (sprite.voxel) {
+				const key = sprite.voxel.toUpperCase();
+				if (!artwork.voxels.has(key)) {
+					const model = await fetch_voxel_model(directory, sprite.voxel);
+					if (!model) {
+						continue;
+					}
+					artwork.voxels.set(key, model);
+				}
+				sprite.voxel = key;
+				born = sprite;
+			} else {
+				born = (await bind_sprite_shapes(directory, artwork, [sprite]))[0];
+			}
+			if (!born) {
+				continue;
+			}
+			team.Add(born);
+			type.House.Tracking_Add(born.rtti, born.type_name, Considered_Vehicle(resolved.type), resolved.type.insignificant);
+			const key = born.type_name.toUpperCase();
+			artwork.production.counts.set(key, (artwork.production.counts.get(key) ?? 0) + 1);
+			const transporter = resolved.type.passengers > 0 && (air ? resolved.rtti === "aircraft" : resolved.rtti === "unit");
+			if (transporter) {
+				transports.push(born);
+			} else {
+				riders.push(born);
+			}
+			if (drop_pod) {
+				const center = Cell_Center(drop_cell);
+				if (born.foot) {
+					born.foot.lx = center.x;
+					born.foot.ly = center.y;
+					const placed = Apply_Coord(born.foot);
+					born.x = placed.x;
+					born.y = placed.y;
+					born.ox = placed.ox;
+					born.oy = placed.oy;
+					const claimed = Closest_Free_Spot(artwork.sprites, born, drop_cell, center, artwork.sprites.length);
+					if (claimed) {
+						born.foot.lx = claimed.x;
+						born.foot.ly = claimed.y;
+						const spot = Apply_Coord(born.foot);
+						born.x = spot.x;
+						born.y = spot.y;
+						born.ox = spot.ox;
+						born.oy = spot.oy;
+					}
+					Assign_Destination(born.foot, drop_cell);
+				}
+				artwork.sprites.push(born);
+				Look(artwork, born, shroud);
+				for (let dir = 0; dir < 8; dir++) {
+					const next = Adjacent_Cell(drop_cell, dir);
+					if (In_Radar_Cell(next.x, next.y, play) && cells.has(`${next.x},${next.y}`)) {
+						drop_cell = next;
+						break;
+					}
+				}
+			}
+		}
+	}
+	if (drop_pod) {
+		Sort_Sprites(artwork);
+		team.Flag_Into_Action();
+		return;
+	}
+	if (transports.length > 0 && riders.length > 0) {
+		const carrier = transports[0]!;
+		carrier.cargo.push(...riders);
+		if (type.Has_Unload() && carrier.rtti === "aircraft") {
+			carrier.loaner = true;
+		}
+	}
+	const appear = drop_pod || atwaypoint ? origin : reinforcement_edge(origin, type.House, play, cells);
+	const visible = transports.length > 0 ? transports : riders;
+	for (const born of visible) {
+		const spawn = nearby_spawn_cell(artwork, appear, born.rtti === "unit" ? "unit" : born.rtti === "aircraft" ? "aircraft" : "infantry", play, cells) ?? appear;
+		const center = Cell_Center(spawn);
+		if (born.foot) {
+			born.foot.lx = center.x;
+			born.foot.ly = center.y;
+			if (born.rtti === "aircraft") {
+				const flight = type_for_sprite(artwork, born);
+				born.foot.height_agl = flight && flight.flight_level >= 0 ? flight.flight_level : artwork.production.flight_level;
+			}
+			const placed = Apply_Coord(born.foot);
+			born.x = placed.x;
+			born.y = placed.y;
+			born.ox = placed.ox;
+			born.oy = placed.oy;
+			if (!atwaypoint || born.rtti === "aircraft") {
+				Assign_Destination(born.foot, origin);
+			}
+		}
+		artwork.sprites.push(born);
+		Look(artwork, born, shroud);
+	}
+	Sort_Sprites(artwork);
+	team.Flag_Into_Action();
+}
+
+function make_team_sprite(
+	artwork: MapArtwork,
+	type: ShapeType,
+	rtti: "infantry" | "unit" | "aircraft",
+	cell: Point2D,
+	house: HouseClass,
+): MapSprite {
+	const files = object_files(type, artwork.production.seed);
+	const layer = rtti === "aircraft" ? 5 : 2;
+	const sprite = make_sprite(cell.x, cell.y, type.voxel ? [] : files, type.terrain_palette ? "theater" : "unit", layer, {
+		scheme: type.terrain_palette ? "" : house.Scheme,
+		selectable: true,
+		blip: house_spawn_blip(artwork, house),
+		select: rtti === "infantry" ? { kind: "shape", frame: 2 } : unit_select(type, false),
+		rtti,
+		owned: house === PlayerPtr,
+		house: house.HeapID,
+		ammo: type.ammo,
+		type_name: type.name,
+		strength: type.strength,
+		health_ratio: 1,
+		dir: 0,
+		frame: rtti === "infantry" ? infantry_ready_frame(type, 0) : unit_stand_frame(type, 0),
+		foot: unit_foot(type, cell, 0),
+		voxel: type.voxel ? type.voxel_stem : "",
+		harvest: harvest_state(type, artwork.tiberiums.length),
+	});
+	return sprite;
+}
+
 export function Factory_AI(artwork: MapArtwork): FactoryObject[] {
 	const ready: FactoryObject[] = [];
 	for (const factory of artwork.production.factories.values()) {
-		factory.AI(artwork.credits, (cost) => {
+		factory.AI(Available_Money(artwork), (cost) => {
 			Spend_Credits(artwork, cost);
 		});
 		if (factory.ExitingFoot && exit_radio_clear(artwork, factory)) {
@@ -2715,6 +3630,7 @@ function Take_Damage(
 	if (sprite.strength > 0) {
 		return;
 	}
+	Spring_Destroyed(artwork, artwork.shroud_map, sprite, _source);
 	for (const other of artwork.sprites) {
 		if (other.tarcom === sprite) {
 			Assign_Target(other, null);
@@ -2742,6 +3658,11 @@ export function Object_AI(artwork: MapArtwork, sprite: MapSprite, play: Rect, ce
 	}
 	if (sprite.tarcom && (sprite.tarcom.strength <= 0 || !artwork.sprites.includes(sprite.tarcom))) {
 		Assign_Target(sprite, null);
+	}
+	const type = type_for_sprite(artwork, sprite);
+	if (type?.harvester && sprite.harvest) {
+		Harvest_AI(artwork, sprite, type, play, cells);
+		return;
 	}
 	Target_Something_Nearby(artwork, sprite);
 	if (sprite.tarcom) {
@@ -2780,13 +3701,42 @@ export function House_AI(artwork: MapArtwork): void {
 			Recalc_Power(artwork);
 		}
 		house.AI();
+		Spring_House_Tags(artwork, artwork.shroud_map, house);
 	}
 }
 
 function Spend_Credits(artwork: MapArtwork, cost: number): void {
-	artwork.credits -= cost;
+	let left = cost;
+	const cash = Math.min(left, Math.max(0, artwork.credits));
+	artwork.credits -= cash;
+	left -= cash;
 	if (PlayerPtr) {
-		PlayerPtr.Credits -= cost;
+		PlayerPtr.Credits = artwork.credits;
+	}
+	if (left <= 0) {
+		return;
+	}
+	for (const sprite of artwork.sprites) {
+		if (left <= 0 || sprite.rtti !== "building" || !sprite.owned) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (!type || type.capacity <= 0) {
+			continue;
+		}
+		for (let slot = 0; slot < sprite.storage.length && left > 0; slot++) {
+			const value = artwork.tiberiums[slot]?.value ?? 0;
+			while ((sprite.storage[slot] ?? 0) > 0 && left > 0) {
+				sprite.storage[slot]!--;
+				left -= value > 0 ? value : 1;
+			}
+		}
+	}
+	if (left < 0) {
+		artwork.credits -= left;
+		if (PlayerPtr) {
+			PlayerPtr.Credits = artwork.credits;
+		}
 	}
 }
 
@@ -2794,6 +3744,352 @@ function Gain_Credits(artwork: MapArtwork, amount: number): void {
 	artwork.credits += amount;
 	if (PlayerPtr) {
 		PlayerPtr.Credits += amount;
+	}
+}
+
+export function Available_Money(artwork: MapArtwork): number {
+	let value = artwork.credits;
+	for (const sprite of artwork.sprites) {
+		if (sprite.rtti !== "building" || !sprite.owned) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (!type || type.capacity <= 0) {
+			continue;
+		}
+		for (let slot = 0; slot < sprite.storage.length; slot++) {
+			value += (sprite.storage[slot] ?? 0) * (artwork.tiberiums[slot]?.value ?? 0);
+		}
+	}
+	return value;
+}
+
+function Cost_Of(artwork: MapArtwork, type: ShapeType): number {
+	let cost = type.cost;
+	if (type.free_unit) {
+		const unit = artwork.production.units.get(type.free_unit.toUpperCase());
+		if (unit) {
+			cost += unit.cost;
+		}
+	}
+	return Math.max(0, cost);
+}
+
+function storage_total(storage: number[]): number {
+	let total = 0;
+	for (const amount of storage) {
+		total += amount;
+	}
+	return total;
+}
+
+function empty_storage(slots: number): number[] {
+	return Array.from({ length: Math.max(1, slots) }, () => 0);
+}
+
+function harvest_state(type: ShapeType, slots: number): HarvestState | null {
+	if (!type.harvester) {
+		return null;
+	}
+	return {
+		status: HARVEST_LOOKING,
+		stage: 0,
+		storage: empty_storage(slots),
+		archive: null,
+		dock: null,
+	};
+}
+
+function unit_foot(type: ShapeType, cell: Point2D, dir256 = 0): FootState {
+	const foot = Make_Foot(cell, type.speed, type.rot);
+	Set_Drive_Facing(foot, dir256);
+	return foot;
+}
+
+function house_capacity(artwork: MapArtwork, house: number): number {
+	let cap = 0;
+	for (const sprite of artwork.sprites) {
+		if (sprite.rtti !== "building" || sprite.house !== house) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (type && type.capacity > 0) {
+			cap += type.capacity;
+		}
+	}
+	return cap;
+}
+
+function house_stored(artwork: MapArtwork, house: number): number {
+	let total = 0;
+	for (const sprite of artwork.sprites) {
+		if (sprite.rtti !== "building" || sprite.house !== house) {
+			continue;
+		}
+		total += storage_total(sprite.storage);
+	}
+	return total;
+}
+
+function House_Harvested(artwork: MapArtwork, house: number, amount: number, slot: number): void {
+	let left = amount;
+	const room = house_capacity(artwork, house) - house_stored(artwork, house);
+	if (left > room) {
+		left = Math.max(0, room);
+	}
+	for (const sprite of artwork.sprites) {
+		if (left <= 0 || sprite.rtti !== "building" || sprite.house !== house) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (!type || type.capacity <= 0) {
+			continue;
+		}
+		if (sprite.storage.length < artwork.tiberiums.length) {
+			sprite.storage = empty_storage(artwork.tiberiums.length);
+		}
+		while (left > 0 && storage_total(sprite.storage) < type.capacity) {
+			sprite.storage[slot] = (sprite.storage[slot] ?? 0) + 1;
+			left--;
+		}
+	}
+}
+
+function foot_idle(sprite: MapSprite): boolean {
+	const foot = sprite.foot;
+	if (!foot) {
+		return true;
+	}
+	return !foot.dest && !foot.moving && !foot.head && !foot.is_driving && foot.rotation_timer <= 0;
+}
+
+function tiberium_at(artwork: MapArtwork, cell: Point2D): MapSprite | null {
+	for (const sprite of artwork.sprites) {
+		if (sprite.tib >= 0 && sprite.x === cell.x && sprite.y === cell.y) {
+			return sprite;
+		}
+	}
+	return null;
+}
+
+function tiberium_value(artwork: MapArtwork, overlay: MapSprite): number {
+	const type = artwork.tiberiums[overlay.tib];
+	return (type?.value ?? 0) * (overlay.frame + 1);
+}
+
+function Search_For_Tiberium(artwork: MapArtwork, from: Point2D, rad: number, play: Rect, cells: Set<string>, mover: MapSprite): Point2D | null {
+	const here = tiberium_at(artwork, from);
+	if (here) {
+		return from;
+	}
+	let best: Point2D | null = null;
+	let best_value = -1;
+	for (let radius = 1; radius < rad; radius++) {
+		for (let x = -radius; x <= radius; x++) {
+			const ring: Point2D[] = [
+				{ x: from.x + x, y: from.y - radius },
+				{ x: from.x + x, y: from.y + radius },
+				{ x: from.x - radius, y: from.y + x },
+				{ x: from.x + radius, y: from.y + x },
+			];
+			for (const cell of ring) {
+				const overlay = tiberium_at(artwork, cell);
+				if (!overlay || !can_enter_foot(artwork, mover, cell, play, cells, false)) {
+					continue;
+				}
+				const value = tiberium_value(artwork, overlay);
+				if (value > best_value) {
+					best_value = value;
+					best = cell;
+				}
+			}
+		}
+		if (best) {
+			break;
+		}
+	}
+	return best;
+}
+
+function Reduce_Tiberium(artwork: MapArtwork, cell: Point2D, levels: number): number {
+	const overlay = tiberium_at(artwork, cell);
+	if (!overlay || levels <= 0) {
+		return 0;
+	}
+	if (overlay.frame + 1 > levels) {
+		overlay.frame -= levels;
+		return levels;
+	}
+	const took = overlay.frame;
+	const index = artwork.sprites.indexOf(overlay);
+	if (index >= 0) {
+		artwork.sprites.splice(index, 1);
+	}
+	return took;
+}
+
+function Find_Docking_Bay(artwork: MapArtwork, harvester: MapSprite, type: ShapeType): MapSprite | null {
+	let best: MapSprite | null = null;
+	let best_dist = Number.POSITIVE_INFINITY;
+	for (const name of type.dock) {
+		const key = name.toUpperCase();
+		for (const building of artwork.sprites) {
+			if (building.rtti !== "building" || building.house !== harvester.house || building.strength <= 0) {
+				continue;
+			}
+			if (building.type_name.toUpperCase() !== key) {
+				continue;
+			}
+			const dist = Math.abs(building.x - harvester.x) + Math.abs(building.y - harvester.y);
+			const dock_type = type_for_sprite(artwork, building);
+			if (dock_type?.leader) {
+				return building;
+			}
+			if (dist < best_dist) {
+				best_dist = dist;
+				best = building;
+			}
+		}
+		if (best) {
+			return best;
+		}
+	}
+	return best;
+}
+
+function dock_cell(artwork: MapArtwork, building: MapSprite, harvester: MapSprite, play: Rect, cells: Set<string>): Point2D {
+	const type = type_for_sprite(artwork, building);
+	const center = type ? occupy_center(building, type.occupy) : { x: building.x, y: building.y };
+	const prefer = { x: center.x + 1, y: center.y };
+	if (Can_Move_To(artwork, harvester, prefer, play, cells)) {
+		return prefer;
+	}
+	return nearby_enter(artwork, harvester, prefer, play, cells) ?? nearby_enter(artwork, harvester, center, play, cells) ?? prefer;
+}
+
+function Harvest_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, play: Rect, cells: Set<string>): void {
+	if (!sprite.harvest || !sprite.foot) {
+		return;
+	}
+	const state = sprite.harvest;
+	if (state.storage.length < artwork.tiberiums.length) {
+		state.storage = empty_storage(artwork.tiberiums.length);
+	}
+	const load = storage_total(state.storage);
+	const full = type.capacity > 0 && load >= type.capacity;
+	switch (state.status) {
+		case HARVEST_LOOKING:
+			if (full) {
+				state.status = HARVEST_FINDHOME;
+				break;
+			}
+			if (!foot_idle(sprite)) {
+				break;
+			}
+			{
+				const cell = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_long_scan, play, cells, sprite);
+				if (cell && cell.x === sprite.x && cell.y === sprite.y) {
+					state.status = HARVEST_HARVESTING;
+					state.stage = 0;
+				} else if (cell) {
+					Assign_Destination(sprite.foot, cell);
+				} else if (load > 0) {
+					state.status = HARVEST_FINDHOME;
+				}
+			}
+			break;
+		case HARVEST_HARVESTING:
+			if (!foot_idle(sprite)) {
+				break;
+			}
+			state.stage += 1;
+			if (state.stage < HARVESTER_LOAD_STAGES * artwork.harvester_load_rate) {
+				break;
+			}
+			state.stage = 0;
+			if (full || !tiberium_at(artwork, { x: sprite.x, y: sprite.y })) {
+				if (full) {
+					const nearby = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_short_scan, play, cells, sprite);
+					state.archive = nearby;
+					state.status = HARVEST_FINDHOME;
+				} else {
+					const next = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_short_scan, play, cells, sprite);
+					if (next && (next.x !== sprite.x || next.y !== sprite.y)) {
+						Assign_Destination(sprite.foot, next);
+					} else if (load > 0) {
+						state.status = HARVEST_FINDHOME;
+					} else {
+						state.status = HARVEST_LOOKING;
+					}
+				}
+				break;
+			}
+			{
+				const overlay = tiberium_at(artwork, { x: sprite.x, y: sprite.y });
+				const slot = overlay && overlay.tib >= 0 ? overlay.tib : 0;
+				const room = Math.max(0, type.capacity - load);
+				const took = Reduce_Tiberium(artwork, { x: sprite.x, y: sprite.y }, Math.min(1, room));
+				if (took > 0) {
+					state.storage[slot] = (state.storage[slot] ?? 0) + took;
+				} else {
+					state.status = HARVEST_LOOKING;
+				}
+			}
+			break;
+		case HARVEST_FINDHOME:
+			if (!foot_idle(sprite)) {
+				break;
+			}
+			{
+				const bay = Find_Docking_Bay(artwork, sprite, type);
+				if (!bay) {
+					state.status = HARVEST_LOOKING;
+					break;
+				}
+				state.dock = bay;
+				const dest = dock_cell(artwork, bay, sprite, play, cells);
+				if (dest.x === sprite.x && dest.y === sprite.y) {
+					state.status = HARVEST_DUMPING;
+					state.stage = 0;
+				} else {
+					Assign_Destination(sprite.foot, dest);
+				}
+			}
+			break;
+		case HARVEST_DUMPING:
+			if (!foot_idle(sprite)) {
+				state.status = HARVEST_FINDHOME;
+				break;
+			}
+			state.stage += 1;
+			if (state.stage < artwork.harvester_dump_rate) {
+				break;
+			}
+			state.stage = 0;
+			{
+				let slot = -1;
+				for (let i = 0; i < state.storage.length; i++) {
+					if ((state.storage[i] ?? 0) > 0) {
+						slot = i;
+						break;
+					}
+				}
+				if (slot < 0) {
+					state.dock = null;
+					if (state.archive) {
+						Assign_Destination(sprite.foot, state.archive);
+						state.archive = null;
+					}
+					state.status = HARVEST_LOOKING;
+					break;
+				}
+				state.storage[slot]!--;
+				House_Harvested(artwork, sprite.house, 1, slot);
+			}
+			break;
+		default:
+			state.status = HARVEST_LOOKING;
+			break;
 	}
 }
 
@@ -3320,7 +4616,7 @@ function Repair_AI(artwork: MapArtwork): void {
 		const step = artwork.production.repair_step;
 		const chunks = Math.max(1, (type.strength / step) | 0);
 		const cost = Math.max(1, Math.trunc((type.cost / chunks) * artwork.production.repair_percent));
-		if (artwork.credits < cost) {
+		if (Available_Money(artwork) < cost) {
 			sprite.repairing = false;
 			continue;
 		}
@@ -3380,6 +4676,20 @@ function Remove_Sprite(artwork: MapArtwork, sprite: MapSprite): void {
 		return;
 	}
 	artwork.sprites.splice(index, 1);
+	if (sprite.team) {
+		sprite.team.Remove(sprite);
+	}
+	for (const passenger of sprite.cargo) {
+		if (passenger.team) {
+			passenger.team.Remove(passenger);
+		}
+		const carried = Houses[passenger.house];
+		if (carried && passenger.rtti) {
+			const ptype = type_for_sprite(artwork, passenger);
+			carried.Tracking_Remove(passenger.rtti, passenger.type_name, Considered_Vehicle(ptype), ptype?.insignificant ?? false);
+		}
+	}
+	sprite.cargo = [];
 	const house = Houses[sprite.house];
 	if (house && sprite.rtti) {
 		const type = type_for_sprite(artwork, sprite);
@@ -3583,21 +4893,20 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			if (placed.x !== before.x || placed.y !== before.y) {
 				resorted = true;
 				Look(artwork, sprite, shroud);
+				enter_cell(artwork, shroud, sprite, placed);
 			}
 			Resume_Waypoint(artwork, sprite, play, cells);
 			continue;
 		}
 		const can_step: PathEnter = (from, to, dir) => foot_step(artwork, sprite, from, to, play, cells, false, dir, false);
 		const can_path: PathEnter = (from, to, dir) => foot_step(artwork, sprite, from, to, play, cells, true, dir, true);
-		const moved = Movement_AI(
-			foot,
-			can_step,
-			(cell) => Try_Open_Gate(artwork, cell),
-			can_path,
-			artwork.path_graph,
-			type?.threat_avoid ?? 0,
-			(cell) => claim_head(artwork, sprite, cell),
-		);
+		const try_gate = (cell: Point2D) => Try_Open_Gate(artwork, cell);
+		const avoid = type?.threat_avoid ?? 0;
+		const claim = (cell: Point2D) => claim_head(artwork, sprite, cell);
+		const drive = sprite.rtti === "unit" && (foot.track_number !== -1 || foot.path[0] !== TUNNEL);
+		const moved = drive
+			? Drive_AI(foot, can_step, try_gate, can_path, artwork.path_graph, avoid, claim)
+			: Movement_AI(foot, can_step, try_gate, can_path, artwork.path_graph, avoid, claim);
 		if (!moved) {
 			if (foot.dest && !foot.head) {
 				const here = Coord_Cell(foot.lx, foot.ly);
@@ -3619,7 +4928,9 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 		sprite.y = placed.y;
 		sprite.ox = placed.ox;
 		sprite.oy = placed.oy;
-		if (foot.head) {
+		if (drive) {
+			sprite.dir = Body_Dir256(foot);
+		} else if (foot.head) {
 			const facing = Direction_Facing({ x: foot.lx, y: foot.ly }, foot.head);
 			sprite.dir = Facing_Dir256(facing);
 		}
@@ -3635,6 +4946,7 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 		if (placed.x !== before.x || placed.y !== before.y) {
 			resorted = true;
 			Look(artwork, sprite, shroud);
+			enter_cell(artwork, shroud, sprite, placed);
 		}
 		if (sprite.rtti === "infantry" && !foot.moving && !foot.head) {
 			const here = Coord_Cell(foot.lx, foot.ly);
@@ -3880,7 +5192,7 @@ async function Exit_Object(
 	}
 	const spawn_cell = Coord_Cell(spawn.x, spawn.y);
 	const files = object_files(type, artwork.production.seed);
-	const sprite = make_sprite(spawn_cell.x, spawn_cell.y, files, type.terrain_palette ? "theater" : "unit", rtti === "infantry" ? 2 : 2, {
+	const sprite = make_sprite(spawn_cell.x, spawn_cell.y, type.voxel ? [] : files, type.terrain_palette ? "theater" : "unit", rtti === "infantry" ? 2 : 2, {
 		scheme: artwork.production.scheme,
 		selectable: true,
 		blip: artwork.production.blip,
@@ -3893,8 +5205,10 @@ async function Exit_Object(
 		strength: type.strength,
 		health_ratio: 1,
 		dir: Facing_Dir256(Direction_Facing(spawn, Cell_Center(exitcell))),
-		frame: rtti === "infantry" ? infantry_ready_frame(type, 0) : unit_stand_frame(type, 0),
-		foot: Make_Foot(spawn_cell, type.speed),
+		frame: rtti === "infantry" ? infantry_ready_frame(type, 0) : unit_stand_frame(type, Facing_Dir256(Direction_Facing(spawn, Cell_Center(exitcell)))),
+		foot: rtti === "unit" ? unit_foot(type, spawn_cell, Facing_Dir256(Direction_Facing(spawn, Cell_Center(exitcell)))) : Make_Foot(spawn_cell, type.speed),
+		voxel: type.voxel ? type.voxel_stem : "",
+		harvest: harvest_state(type, artwork.tiberiums.length),
 	});
 	sprite.foot!.lx = spawn.x;
 	sprite.foot!.ly = spawn.y;
@@ -3903,20 +5217,38 @@ async function Exit_Object(
 	sprite.y = placed.y;
 	sprite.ox = placed.ox;
 	sprite.oy = placed.oy;
-	const ready = await bind_sprite_shapes(directory, artwork, [sprite]);
-	if (ready.length === 0) {
+	let born: MapSprite | undefined;
+	if (sprite.voxel) {
+		const voxel_key = sprite.voxel.toUpperCase();
+		if (!artwork.voxels.has(voxel_key)) {
+			const model = await fetch_voxel_model(directory, sprite.voxel);
+			if (!model) {
+				const stalled = artwork.production.factories.get(entry.BuildableType);
+				if (stalled) {
+					stalled.IsExiting = false;
+				}
+				return false;
+			}
+			artwork.voxels.set(voxel_key, model);
+		}
+		sprite.voxel = voxel_key;
+		born = sprite;
+	} else {
+		born = (await bind_sprite_shapes(directory, artwork, [sprite]))[0];
+	}
+	if (!born) {
 		const stalled = artwork.production.factories.get(entry.BuildableType);
 		if (stalled) {
 			stalled.IsExiting = false;
 		}
 		return false;
 	}
-	const born = ready[0]!;
 	Assign_Destination(born.foot!, exitcell);
 	artwork.sprites.push(born);
 	Sort_Sprites(artwork);
 	if (PlayerPtr) {
 		PlayerPtr.Tracking_Add(born.rtti, born.type_name, Considered_Vehicle(type), type.insignificant);
+		Just_Built(PlayerPtr, born, type);
 	}
 	const key = type.name.toUpperCase();
 	artwork.production.counts.set(key, (artwork.production.counts.get(key) ?? 0) + 1);
@@ -4018,6 +5350,7 @@ async function Exit_Aircraft(
 	Sort_Sprites(artwork);
 	if (PlayerPtr) {
 		PlayerPtr.Tracking_Add(born.rtti, born.type_name, Considered_Vehicle(type), type.insignificant);
+		Just_Built(PlayerPtr, born, type);
 	}
 	const key = type.name.toUpperCase();
 	artwork.production.counts.set(key, (artwork.production.counts.get(key) ?? 0) + 1);
@@ -4470,6 +5803,83 @@ export function Can_Place_Building(
 	return Passes_Proximity(artwork, cell, pending.occupy, pending.adjacent);
 }
 
+async function Place_Free_Unit(
+	directory: GameDirectory,
+	artwork: MapArtwork,
+	building: MapSprite,
+	factory_type: ShapeType,
+	play: Rect,
+	cells: Set<string>,
+	shroud: ShroudMap | null,
+): Promise<void> {
+	const unit_type = artwork.production.units.get(factory_type.free_unit.toUpperCase());
+	const house = Houses[building.house] ?? PlayerPtr;
+	if (!unit_type || !house) {
+		return;
+	}
+	const center = occupy_center(building, factory_type.occupy);
+	const south = Adjacent_Cell(center, 4);
+	let spawn = nearby_spawn_cell(artwork, south, "unit", play, cells);
+	if (!spawn || !cell_clear_for(artwork, spawn, "unit", play, cells)) {
+		spawn = nearby_spawn_cell(artwork, center, "unit", play, cells);
+	}
+	if (!spawn || !cell_clear_for(artwork, spawn, "unit", play, cells)) {
+		Gain_Credits(artwork, unit_type.cost);
+		return;
+	}
+	const files = object_files(unit_type, artwork.production.seed);
+	const sprite = make_sprite(spawn.x, spawn.y, unit_type.voxel ? [] : files, "unit", 2, {
+		scheme: house.Scheme,
+		selectable: true,
+		blip: house_spawn_blip(artwork, house),
+		select: unit_select(unit_type, false),
+		rtti: "unit",
+		owned: house === PlayerPtr,
+		house: house.HeapID,
+		ammo: unit_type.ammo,
+		type_name: unit_type.name,
+		strength: unit_type.strength,
+		health_ratio: 1,
+		dir: Facing_Dir256(6),
+		frame: unit_stand_frame(unit_type, Facing_Dir256(6)),
+		foot: unit_foot(unit_type, spawn, Facing_Dir256(6)),
+		voxel: unit_type.voxel ? unit_type.voxel_stem : "",
+		harvest: harvest_state(unit_type, artwork.tiberiums.length),
+	});
+	let born: MapSprite | undefined;
+	if (sprite.voxel) {
+		const key = sprite.voxel.toUpperCase();
+		if (!artwork.voxels.has(key)) {
+			const model = await fetch_voxel_model(directory, sprite.voxel);
+			if (!model) {
+				Gain_Credits(artwork, unit_type.cost);
+				return;
+			}
+			artwork.voxels.set(key, model);
+		}
+		sprite.voxel = key;
+		born = sprite;
+	} else {
+		born = (await bind_sprite_shapes(directory, artwork, [sprite]))[0];
+	}
+	if (!born) {
+		Gain_Credits(artwork, unit_type.cost);
+		return;
+	}
+	const placed = Apply_Coord(born.foot!);
+	born.x = placed.x;
+	born.y = placed.y;
+	born.ox = placed.ox;
+	born.oy = placed.oy;
+	artwork.sprites.push(born);
+	Sort_Sprites(artwork);
+	house.Tracking_Add(born.rtti, born.type_name, Considered_Vehicle(unit_type), unit_type.insignificant);
+	Just_Built(house, born, unit_type);
+	const count_key = born.type_name.toUpperCase();
+	artwork.production.counts.set(count_key, (artwork.production.counts.get(count_key) ?? 0) + 1);
+	Look(artwork, born, shroud);
+}
+
 export async function Place_Pending(
 	directory: GameDirectory,
 	artwork: MapArtwork,
@@ -4497,8 +5907,12 @@ export async function Place_Pending(
 	for (const sprite of ready) {
 		if (sprite.rtti === "building") {
 			Apply_Health_Status(artwork, sprite);
+			if (type && type.capacity > 0) {
+				sprite.storage = empty_storage(artwork.tiberiums.length);
+			}
 			if (PlayerPtr && type) {
 				PlayerPtr.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
+				Just_Built(PlayerPtr, sprite, type);
 			}
 		}
 	}
@@ -4531,6 +5945,10 @@ export async function Place_Pending(
 	artwork.production.factories.delete(pending.kind);
 	Unlink_Factory(artwork, factory);
 	artwork.production.pending = null;
+	const building = ready.find((sprite) => sprite.rtti === "building");
+	if (type?.free_unit && building) {
+		await Place_Free_Unit(directory, artwork, building, type, play, cells, shroud);
+	}
 	await Recalc_Buildables(directory, artwork);
 	return true;
 }
@@ -4567,8 +5985,8 @@ function Begin_Production(artwork: MapArtwork, entry: BuildType): boolean {
 			kind: entry.BuildableType,
 			id: entry.BuildableID,
 			name: type.name,
-			cost: type.cost,
-			time: Time_To_Build(type.cost, artwork.production.build_speed, artwork.power_output, artwork.power_drain),
+			cost: Cost_Of(artwork, type),
+			time: Time_To_Build(Cost_Of(artwork, type), artwork.production.build_speed, artwork.power_output, artwork.power_drain),
 		})) {
 			return false;
 		}

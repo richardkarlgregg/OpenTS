@@ -56,9 +56,29 @@ game.
   `Speed=` then explode. Guard auto-acquires in `ThreatRange`; a player
   `ACTION_ATTACK` (`MOUSE_CAN_ATTACK` / `MOUSE_STAY_ATTACK`) chases out of
   range. Homing, arcing gravity, particles, lasers, and explosion SHPs are
-  not ported. `HouseClass::AI` still only recalcs power; computer base-building
-  and triggers are not. `Assign_Handicap` is not. `LogicClass` still runs
-  factories before objects.
+  not ported. `[Triggers]` / `[Tags]` / `[CellTags]` load after houses; live-owner
+  and difficulty flags match C++.   `LogicClass` springs `LogicTags` (`TEVENT_TIME`,
+  `LOCAL_SET`) before factories, then objects, then `HouseTags` (`TEVENT_BUILD`,
+  `ALL_DESTROYED`). GDI1A events `PLAYER_ENTERED`, `DESTROYED`/`DESTROYED_ANY`,
+  `BUILD`, `ALL_DESTROYED`, `BUILDINGS_DESTROYED`, `TIME`, and `LOCAL_SET` fire.
+  Actions `TEXT_TRIGGER` (TUTORIAL.INI), `SET_LOCAL`, `FORCE_TRIGGER` /
+  `DESTROY_TRIGGER`, `REVEAL_SOME`, `CENTER_VIEWPOINT`, `LOCK_INPUT` /
+  `UNLOCK_INPUT`, and `WIN`/`LOSE` (message overlay, no score screen) run.
+  `[TaskForces]` / `[ScriptTypes]` / `[TeamTypes]` load after houses and before
+  triggers. `CREATE_TEAM` recruits matching live members of that house.
+  `REINFORCEMENTS` / `REINFORCEMENTS_SPECIAL` spawn the task force: drop-pod
+  infantry (`Droppod=yes`) appear at the team origin or action waypoint;
+  transports such as DSHP carry passengers as cargo and `UNLOAD` them, then a
+  loaner aircraft flies its remaining `MOVE` and is removed. Team scripts run
+  `MOVE` / `ATT_WAYPT` / `GUARD` / `UNLOAD` / `LOOP` / `SET_LOCAL` /
+  `CHANGE_HOUSE`. Placing a building with `FreeUnit=` (the GDI1A refinery)
+  spawns that vehicle to the south and starts `MISSION_HARVEST`. Harvesters
+  walk to overlay Tiberium, lift one unit per `HarvesterLoadRate` animation
+  cycle, then dock east of a `Dock=` refinery and dump at `HarvesterDumpRate`
+  into building `Storage=`. The credit tab is `Credits` plus stored Tiberium
+  `Value=`. Harvest SHP, radio tether, weeders, and EVA are not. Full
+  attack-quarry AI, movies, and the score screen are not. `HouseClass::AI` still only recalcs power; computer
+  base-building is not. `Assign_Handicap` is not.
   Voxel units load `.VXL`/`.HVA` (plus `TUR`/`BARL`/`W` pieces) and project
   through the isometric view matrix and body facing. The view is the 640x400
   in-game layout: tabs and credits, `RADAR.SHP` frame 0, `SIDE1`/`SIDE2`/`SIDE3`/`ADDON`
@@ -115,9 +135,15 @@ game.
   buildings still wait for a Ready click. Each queued infantry or vehicle
   also auto-exits when its turn completes. Non-building cameos queue up to
   RULES `[General] MaximumQueuedObjects` (default 5); buildings cannot.
-  Queue counts print at `QUEUE_COUNT_X_OFFSET`. They walk with
-	`WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
-  `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Infantry
+  Queue counts print at `QUEUE_COUNT_X_OFFSET`. Infantry walk with
+  `WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
+  `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Vehicles use
+  `DriveLocomotionClass`: `Start_Of_Move` picks a `TrackControl` entry from the
+  current facing and the next path facing, `While_Moving` steps the raw track
+  offsets (smooth-turn `F_T`/`F_X`/`F_Y`/`F_D`) by `SpeedAccum` against
+  `(PIXEL_LEPTON_W + PIXEL_LEPTON_H) / 2`, and `PrimaryFacing` comes from the
+  track `Dir256` (ROT turn-in-place before a track that does not already face
+  the first step). Infantry
   `Mark_Head_To` takes `Closest_Free_Spot` (spots 2, 3, and 4; the cell
   centre and NW are never free), so three infantry share a cell. Vehicles
   set `Flag.Occupy.Vehicle` and wait rather than stack. Path search

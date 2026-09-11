@@ -56,7 +56,9 @@ import {
 	Gate_AI,
 	Health_Ratio,
 	House_AI,
+	Available_Money,
 	In_Range_Of,
+	LogicClass_AI,
 	Mode_Action,
 	Mouse_Left_Held,
 	Mouse_Left_Press,
@@ -67,6 +69,8 @@ import {
 	Repair_Mode_Control,
 	Select,
 	Sell_Mode_Control,
+	Team_AI,
+	Deliver_Pending_Teams,
 	Unselect,
 	Unselect_All,
 	What_Action,
@@ -1019,7 +1023,7 @@ function composite_view(
 	const labels = draw_hud(
 		frame,
 		hud,
-		artwork?.credits ?? 0,
+		artwork ? Available_Money(artwork) : 0,
 		artwork?.power_output ?? 0,
 		artwork?.power_drain ?? 0,
 		radar_on,
@@ -1038,6 +1042,15 @@ function composite_view(
 	}
 	if (radar && radar_on) {
 		Render_Radar(frame, radar, cells, tiles, shroud, artwork?.sprites ?? [], camera);
+	}
+	if (artwork?.message) {
+		labels.push({
+			x: TAC_X + 8,
+			y: TAC_Y + TAC_H - 22,
+			width: TAC_W - 16,
+			height: 16,
+			text: artwork.message,
+		});
 	}
 	return { frame, labels };
 }
@@ -1361,6 +1374,9 @@ export async function Show_Tactical(
 	const palettes = new Map<string, Uint16Array>();
 	const cell_lights = gather_cell_lights(draw_list, lighting, artwork);
 	const shroud = artwork ? new ShroudMap(play, artwork.lookers) : null;
+	if (artwork) {
+		artwork.shroud_map = shroud;
+	}
 	const hud = await load_sidebar(directory, log);
 	const mouse = new MouseClass();
 	await mouse.One_Time(directory);
@@ -1386,6 +1402,7 @@ export async function Show_Tactical(
 	let shift_down = false;
 	const exits: FactoryObject[] = [];
 	let exiting = false;
+	let delivering = false;
 	if (radar) {
 		log(`Radar ${radar_exists ? "on" : "off"} ${radar.blit_w}x${radar.blit_h}.`);
 	}
@@ -1454,6 +1471,12 @@ export async function Show_Tactical(
 		if (!artwork) {
 			return;
 		}
+		LogicClass_AI(artwork);
+		Team_AI(artwork, play, cell_keys, shroud);
+		if (artwork.center_on) {
+			camera = clamp_to_tactical_rect(starting_camera(draw_list, play, local, artwork.center_on), play, local);
+			artwork.center_on = null;
+		}
 		const ready = Factory_AI(artwork);
 		Gate_AI(artwork);
 		Display_AI(artwork);
@@ -1474,6 +1497,12 @@ export async function Show_Tactical(
 			exits.push(...ready);
 		}
 		sync_radar();
+		if (!delivering && artwork.pending_teams.length > 0) {
+			delivering = true;
+			void Deliver_Pending_Teams(directory, artwork, play, cell_keys, shroud).finally(() => {
+				delivering = false;
+			});
+		}
 		if (!exiting && exits.length > 0) {
 			exiting = true;
 			const batch = exits.splice(0, exits.length);
@@ -1531,6 +1560,9 @@ export async function Show_Tactical(
 		const on_down = (event: MouseEvent): void => {
 			event.preventDefault();
 			on_move(event);
+			if (artwork?.input_locked) {
+				return;
+			}
 			if (event.button === 2) {
 				if (scroll.mouse_down) {
 					return;
@@ -1785,6 +1817,9 @@ export async function Show_Tactical(
 				finish();
 				return;
 			}
+			if (artwork?.input_locked) {
+				return;
+			}
 			const step = ISO_TILE_PIXEL_W;
 			if (event.key === "ArrowLeft") {
 				camera = clamp_to_tactical_rect({ x: camera.x - step, y: camera.y }, play, local);
@@ -1811,7 +1846,7 @@ export async function Show_Tactical(
 				sys_accum -= tick_ms;
 				system_tick();
 			}
-			camera = scroll_edge(mouse, camera, play, local, scroll, now);
+			camera = artwork?.input_locked ? camera : scroll_edge(mouse, camera, play, local, scroll, now);
 			if (artwork && scroll.mouse_down) {
 				Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
 			}

@@ -12,6 +12,7 @@
 
 import { INIClass } from "./ini";
 import { GAME_NORMAL, SessionType } from "./session";
+import type { TagClass } from "./trigger";
 
 export const HOUSE_NONE = -1;
 export const HOUSE_FIRST = 0;
@@ -164,6 +165,11 @@ export class HouseClass {
 	AQuantity = new Map<string, number>();
 	IQuantity = new Map<string, number>();
 	UQuantity = new Map<string, number>();
+	HouseTags: TagClass[] = [];
+	JustBuiltStructure = -1;
+	JustBuiltInfantry = -1;
+	JustBuiltUnit = -1;
+	JustBuiltAircraft = -1;
 
 	constructor(type: HouseTypeClass) {
 		this.Class = type;
