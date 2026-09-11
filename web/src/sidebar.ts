@@ -258,6 +258,10 @@ export function draw_hud(
 	drain = 0,
 	radar_on = false,
 	strips: SidebarStrips | null = null,
+	repair_on = false,
+	sell_on = false,
+	power_on = false,
+	waypoint_on = false,
 ): CanvasLabel[] {
 	const side_x = TAC_W;
 	if (hud.tabs) {
@@ -287,8 +291,11 @@ export function draw_hud(
 
 	const button_y = SIDE_Y + BUTTON_ONE_Y + 3;
 	const buttons = [hud.repair, hud.sell, hud.power, hud.waypoint];
+	const on = [repair_on, sell_on, power_on, waypoint_on];
 	for (let i = 0; i < buttons.length; i++) {
-		blit(dest, hud.palette, buttons[i]!, 0, side_x + BUTTON_ONE_X + i * BUTTON_SPACING, button_y);
+		const shape = buttons[i] ?? null;
+		const frame = on[i] && shape && shape.frames.length > 1 ? 1 : 0;
+		blit(dest, hud.palette, shape, frame, side_x + BUTTON_ONE_X + i * BUTTON_SPACING, button_y);
 	}
 
 	const pips = Desired_Levels(output, drain, visible);
@@ -428,6 +435,29 @@ function blit_darken(dest: DSurface, shape: ShapeSet, x: number, y: number, clip
 			dest.pixels[dest_row + sx]! &= DARKEN_MASK;
 		}
 	}
+}
+
+export type SidebarButton = "repair" | "sell" | "power" | "waypoint";
+
+export function Sidebar_Button_At(point: Point2D, hud: SidebarArt): SidebarButton | null {
+	const names: SidebarButton[] = ["repair", "sell", "power", "waypoint"];
+	const shapes = [hud.repair, hud.sell, hud.power, hud.waypoint];
+	const button_y = SIDE_Y + BUTTON_ONE_Y + 3;
+	for (let i = 0; i < names.length; i++) {
+		const shape = shapes[i];
+		const w = shape?.width ?? 24;
+		const h = shape?.height ?? 18;
+		const box = {
+			x: TAC_W + BUTTON_ONE_X + i * BUTTON_SPACING,
+			y: button_y,
+			w,
+			h,
+		};
+		if (in_box(point, box)) {
+			return names[i]!;
+		}
+	}
+	return null;
 }
 
 export function Sidebar_Click(point: Point2D, hud: SidebarArt, strips: SidebarStrips): boolean {

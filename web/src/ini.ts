@@ -200,6 +200,18 @@ export class INIClass {
 		return found.includes("%") ? value / 100 : value;
 	}
 
+	get_lepton(section: string, entry: string, defvalue = 0): number {
+		const found = this.sections.get(section)?.get(entry);
+		if (found === undefined) {
+			return defvalue;
+		}
+		const value = Number.parseFloat(found);
+		if (!Number.isFinite(value)) {
+			return defvalue;
+		}
+		return Math.trunc(value * 256);
+	}
+
 	get_point(section: string, entry: string, defvalue: Point2D): Point2D {
 		const values = this.read_numbers(section, entry, 2);
 		if (!values) {

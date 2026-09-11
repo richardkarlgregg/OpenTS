@@ -29,22 +29,51 @@ import {
 	type CellLight,
 	type ScenarioLighting,
 } from "./light";
-import { MouseClass, MOUSE_CAN_MOVE, MOUSE_CAN_SELECT, MOUSE_N, MOUSE_NO_MOVE, MOUSE_NO_N, MOUSE_NORMAL } from "./mouse";
+import { MouseClass, MOUSE_CAN_ATTACK, MOUSE_CAN_MOVE, MOUSE_CAN_SELECT, MOUSE_ENTER_WAYPOINT_MODE, MOUSE_FOLLOW_WAYPOINT, MOUSE_LOOP_WAYPOINT_PATH, MOUSE_N, MOUSE_NO_MOVE, MOUSE_NO_N, MOUSE_NO_PLACE_WAYPOINT, MOUSE_NO_REPAIR, MOUSE_NO_SELL_BACK, MOUSE_NO_TOGGLE_POWER, MOUSE_NORMAL, MOUSE_PLACE_WAYPOINT, MOUSE_REPAIR, MOUSE_SELECT_WAYPOINT, MOUSE_SELL_BACK, MOUSE_SELL_UNIT, MOUSE_STAY_ATTACK, MOUSE_TOGGLE_POWER, MOUSE_WAYPOINT } from "./mouse";
 import {
 	ActionLineTimer,
 	Action_Line_AI,
 	Anim_Logic,
-	Assign_Move,
+	Assign_Group_Move,
+	Assign_Target,
+	Abort_Drag_Select,
+	Bandbox_Selection_Callback,
 	Cameo_Left,
+	Bullet_AI,
+	Can_Player_Fire,
 	Cameo_Right,
+	Can_Demolish,
 	Can_Move_To,
 	Can_Place_Building,
+	Can_Repair,
+	Can_Sell_Wall,
+	Can_Toggle_Power,
 	Bind_Path_Graph,
+	Display_AI,
 	Factory_AI,
+	Follow_Waypoint,
 	Foot_AI,
 	Gate_AI,
+	Health_Ratio,
+	House_AI,
+	In_Range_Of,
+	Mode_Action,
+	Mouse_Left_Held,
+	Mouse_Left_Press,
+	Object_AI,
 	Place_Completed_Foot,
 	Place_Pending,
+	Power_Mode_Control,
+	Repair_Mode_Control,
+	Select,
+	Sell_Mode_Control,
+	Unselect,
+	Unselect_All,
+	What_Action,
+	Waypoint_Click,
+	Waypoint_Drag,
+	Waypoint_Mode_Control,
+	Waypoint_Release,
 	type MapArtwork,
 	type MapSprite,
 } from "./objects";
@@ -60,6 +89,7 @@ import {
 	over_tactical,
 	Sidebar_Cameo_At,
 	Sidebar_Click,
+	Sidebar_Button_At,
 	SCREEN_H,
 	SCREEN_W,
 	TAC_H,
@@ -71,6 +101,13 @@ import {
 import { TIMER_SECOND } from "./stimer";
 import { build_hicolor_pixel, DSurface } from "./surface";
 import { Cell_Center } from "./walk";
+import {
+	Can_Add_Waypoint_To_Path,
+	Fetch_Waypoint_Data,
+	Get_Next_Waypoint,
+	PATH_NONE,
+	Waypoint_At,
+} from "./waypoint";
 import type { FactoryObject } from "./factory";
 
 type IsoCell = { x: number; y: number; height: number; tile: number; subtile: number };
@@ -91,6 +128,13 @@ const LEVEL_LEPTON_H = Math.trunc((Math.tan(Math.PI / 2 - Math.PI / 3) * CELL_LE
 const Z_PIXELS_PER_LEPTON = Math.sin(Math.PI / 3) * (ISO_TILE_PIXEL_W / CELL_LEPTON_DIAG);
 const BRIDGE_CELL_HEIGHT = 4;
 const WHITE = 15;
+
+type Selectable = {
+	object: MapSprite;
+	position: Point2D;
+};
+
+let SelectableObjects: Selectable[] = [];
 const PIXEL_TO_COORD_X = Math.trunc(CELL_LEPTON / CELL_PIXEL_W) + 0.6667;
 const PIXEL_TO_COORD_Y = Math.trunc(CELL_LEPTON / CELL_PIXEL_H) + 0.3333302;
 const RAMP_CONTROL: { x: number; y: number; base: number; max: number; extra: number }[] = [
@@ -300,9 +344,10 @@ function draw_view(
 	cell_lights: Map<string, CellLight>,
 	palettes: Map<string, Uint16Array>,
 	shroud: ShroudMap | null,
-	selected: MapSprite | null,
+	selected: MapSprite[],
 	ghost: { cell: Point2D; legal: boolean } | null,
-): DSurface {
+	mouse: MouseClass | null,
+): { frame: DSurface; labels: CanvasLabel[] } {
 	const origin = view_origin(camera);
 	const frame = new DSurface(VIEW_W, VIEW_H);
 	const heights = new Map<string, number>();
@@ -341,7 +386,10 @@ function draw_view(
 		}
 	}
 	if (artwork) {
+		SelectableObjects = [];
 		const color = Convert_Pixel(artwork.unit_palette, WHITE);
+		const waypoint_labels = Draw_Waypoints(frame, origin, artwork, heights, shroud, mouse);
+		Add_Buildings_To_Selectable(artwork, origin, heights);
 		const draw_sprite = (sprite: (typeof artwork.sprites)[number], shadow: boolean): void => {
 			if (shroud && !shroud.IsMapped(sprite.x, sprite.y)) {
 				return;
@@ -395,17 +443,26 @@ function draw_view(
 			const palette = sprite_palette(artwork, sprite, light, palettes);
 			blit_shape(frame, palette, shape, sprite.frame, dx, dy, true);
 		};
+		const register = (sprite: MapSprite): void => {
+			if (sprite.rtti === "building") {
+				return;
+			}
+			Add_To_Selectables(sprite, sprite_draw_point(sprite, origin, heights));
+		};
 		for (const sprite of artwork.sprites) {
 			draw_sprite(sprite, true);
 		}
-		if (selected) {
-			draw_selection_pre(frame, origin, selected, heights, ramps, color);
+		for (const sprite of selected) {
+			draw_selection_pre(frame, origin, sprite, heights, ramps, color);
 		}
 		for (const sprite of artwork.sprites) {
 			draw_sprite(sprite, false);
+			if (sprite.rtti !== "building" && (!shroud || shroud.IsMapped(sprite.x, sprite.y))) {
+				register(sprite);
+			}
 		}
-		if (selected) {
-			draw_selection_post(frame, origin, selected, artwork, heights, ramps, color);
+		for (const sprite of selected) {
+			draw_selection_post(frame, origin, sprite, artwork, heights, ramps, color);
 		}
 		if (ActionLineTimer > 0) {
 			draw_move_lines(frame, origin, artwork, heights, ramps);
@@ -422,11 +479,16 @@ function draw_view(
 				draw_sprite({ ...sprite, x: ghost.cell.x, y: ghost.cell.y }, false);
 			}
 		}
+		if (shroud) {
+			Draw_Shroud(frame, origin, cells, cell_pixel, shroud, artwork.shroud ?? null);
+		}
+		Draw_Rubber_Band(frame, artwork, color);
+		return { frame, labels: waypoint_labels };
 	}
 	if (shroud) {
-		Draw_Shroud(frame, origin, cells, cell_pixel, shroud, artwork?.shroud ?? null);
+		Draw_Shroud(frame, origin, cells, cell_pixel, shroud, null);
 	}
-	return frame;
+	return { frame, labels: [] };
 }
 
 function sprite_center(
@@ -436,9 +498,10 @@ function sprite_center(
 ): Point2D {
 	const height = heights.get(`${sprite.x},${sprite.y}`) ?? 0;
 	const pixel = cell_pixel({ x: sprite.x, y: sprite.y, height });
+	const fly = Z_Lepton_To_Pixel(sprite.foot?.height_agl ?? 0);
 	return {
 		x: pixel.x + (ISO_TILE_PIXEL_W >> 1) + sprite.ox - origin.x,
-		y: pixel.y + (ISO_TILE_PIXEL_H >> 1) + sprite.oy - origin.y,
+		y: pixel.y + (ISO_TILE_PIXEL_H >> 1) + sprite.oy - fly - origin.y,
 	};
 }
 
@@ -473,6 +536,98 @@ function Coord_To_Pixel(coord: Coord, origin: Point2D): Point2D {
 
 function Convert_Pixel(palette: Uint16Array, pixel: number): number {
 	return palette[pixel & 255] ?? 0;
+}
+
+function Is_Point_Within(rect: Rect, point: Point2D): boolean {
+	return point.x >= rect.x && point.x < rect.x + rect.width && point.y >= rect.y && point.y < rect.y + rect.height;
+}
+
+function Add_To_Selectables(object: MapSprite, point: Point2D): boolean {
+	if (point.x >= -32 && point.x <= VIEW_W + 32 && point.y >= -32 && point.y <= VIEW_H + 32) {
+		SelectableObjects.push({ object, position: point });
+		return true;
+	}
+	return false;
+}
+
+function Add_Buildings_To_Selectable(
+	artwork: MapArtwork,
+	origin: Point2D,
+	heights: Map<string, number>,
+): void {
+	for (const sprite of artwork.sprites) {
+		if (sprite.rtti !== "building") {
+			continue;
+		}
+		const point = sprite_draw_point(sprite, origin, heights);
+		if (point.x >= 0 && point.x <= VIEW_W && point.y >= 0 && point.y <= VIEW_H) {
+			Add_To_Selectables(sprite, point);
+		}
+	}
+}
+
+function Select_These(artwork: MapArtwork, rect: Rect): void {
+	if (rect.width <= 0 || rect.height <= 0) {
+		return;
+	}
+	for (const sel of SelectableObjects) {
+		if (!Is_Point_Within(rect, sel.position)) {
+			continue;
+		}
+		Bandbox_Selection_Callback(artwork, sel.object);
+	}
+}
+
+function Select_Rubber_Band(artwork: MapArtwork): void {
+	if (artwork.rubber_band_start.x === 0 && artwork.rubber_band_start.y === 0) {
+		return;
+	}
+	let start = { x: artwork.rubber_band_start.x, y: artwork.rubber_band_start.y };
+	let end = { x: artwork.rubber_band_end.x, y: artwork.rubber_band_end.y };
+	if (start.x > end.x) {
+		const swap = start.x;
+		start.x = end.x;
+		end.x = swap;
+	}
+	if (start.y > end.y) {
+		const swap = start.y;
+		start.y = end.y;
+		end.y = swap;
+	}
+	Select_These(artwork, {
+		x: start.x,
+		y: start.y,
+		width: end.x - start.x + 1,
+		height: end.y - start.y + 1,
+	});
+	artwork.rubber_band_start = { x: 0, y: 0 };
+}
+
+function Draw_Rubber_Band(frame: DSurface, artwork: MapArtwork, color: number): void {
+	if (artwork.rubber_band_start.x === 0 && artwork.rubber_band_start.y === 0) {
+		return;
+	}
+	let start = { x: artwork.rubber_band_start.x, y: artwork.rubber_band_start.y };
+	let end = { x: artwork.rubber_band_end.x, y: artwork.rubber_band_end.y };
+	if (end.x < start.x) {
+		const swap = start.x;
+		start.x = end.x;
+		end.x = swap;
+	}
+	if (end.y < start.y) {
+		const swap = start.y;
+		start.y = end.y;
+		end.y = swap;
+	}
+	frame.draw_rect(start.x, start.y, end.x - start.x + 1, end.y - start.y + 1, color);
+}
+
+function Best_Selected(artwork: MapArtwork | null): MapSprite | null {
+	return artwork && artwork.current_object.length > 0 ? artwork.current_object[0]! : null;
+}
+
+function tactical_mouse(point: Point2D): Point2D {
+	return { x: point.x - TAC_X, y: point.y - TAC_Y };
 }
 
 function draw_move_lines(
@@ -660,7 +815,8 @@ function Draw_Health_Bar(
 		if (barlen <= 0) {
 			return;
 		}
-		let n = Math.trunc(sprite.health_ratio * barlen);
+		const ratio = Health_Ratio(artwork, sprite);
+		let n = Math.trunc(ratio * barlen);
 		if (n <= 1) {
 			n = 1;
 		}
@@ -668,10 +824,10 @@ function Draw_Health_Bar(
 			n = barlen;
 		}
 		let condcolor = 1;
-		if (sprite.health_ratio <= artwork.condition_yellow) {
+		if (ratio <= artwork.condition_yellow) {
 			condcolor = 2;
 		}
-		if (sprite.health_ratio <= artwork.condition_red) {
+		if (ratio <= artwork.condition_red) {
 			condcolor = 4;
 		}
 		const ybase = 2 - 2 * barlen;
@@ -680,7 +836,7 @@ function Draw_Health_Bar(
 		for (let index = 0; index < n; index++) {
 			blit_shape(
 				dest,
-				artwork.unit_palette,
+				artwork.normal_palette,
 				artwork.pips,
 				condcolor,
 				xpoint.x + p0.x + 4 * barlen + 3 - xoff,
@@ -695,7 +851,7 @@ function Draw_Health_Bar(
 		for (let index = n; index < barlen; index++) {
 			blit_shape(
 				dest,
-				artwork.unit_palette,
+				artwork.normal_palette,
 				artwork.pips,
 				0,
 				xpoint.x + p0.x + 4 * barlen + 3 - xoff,
@@ -709,7 +865,7 @@ function Draw_Health_Bar(
 	}
 	const sel = sprite.select;
 	if (sel?.kind === "shape" && artwork.select) {
-		blit_shape(dest, artwork.unit_palette, artwork.select, sel.frame, xpoint.x, xpoint.y, true);
+		blit_shape(dest, artwork.normal_palette, artwork.select, sel.frame, xpoint.x, xpoint.y, true);
 	}
 	if (!artwork.pips) {
 		return;
@@ -717,7 +873,8 @@ function Draw_Health_Bar(
 	const infantry = sprite.rtti === "infantry";
 	const offset = infantry ? { x: -5, y: -24 } : { x: -15, y: -25 };
 	const health_bar_count = infantry ? 8 : 17;
-	let n = Math.trunc(sprite.health_ratio * health_bar_count);
+	const ratio = Health_Ratio(artwork, sprite);
+	let n = Math.trunc(ratio * health_bar_count);
 	if (n <= 1) {
 		n = 1;
 	}
@@ -725,16 +882,16 @@ function Draw_Health_Bar(
 		n = health_bar_count;
 	}
 	let shapenum = 9;
-	if (sprite.health_ratio <= artwork.condition_yellow) {
+	if (ratio <= artwork.condition_yellow) {
 		shapenum = 10;
 	}
-	if (sprite.health_ratio <= artwork.condition_red) {
+	if (ratio <= artwork.condition_red) {
 		shapenum = 11;
 	}
 	for (let index = 0; index < n; index++) {
 		blit_shape(
 			dest,
-			artwork.unit_palette,
+			artwork.normal_palette,
 			artwork.pips,
 			shapenum,
 			xpoint.x + offset.x + 2 * index,
@@ -850,13 +1007,14 @@ function composite_view(
 	palettes: Map<string, Uint16Array>,
 	hud: SidebarArt,
 	shroud: ShroudMap | null,
-	selected: MapSprite | null,
+	selected: MapSprite[],
 	radar: RadarMap | null,
 	ghost: { cell: Point2D; legal: boolean } | null,
+	mouse: MouseClass | null,
 ): { frame: DSurface; labels: CanvasLabel[] } {
-	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected, ghost);
+	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected, ghost, mouse);
 	const frame = new DSurface(SCREEN_W, SCREEN_H);
-	frame.blit_from(TAC_X, TAC_Y, tactical);
+	frame.blit_from(TAC_X, TAC_Y, tactical.frame);
 	const radar_on = radar?.exists === true;
 	const labels = draw_hud(
 		frame,
@@ -866,11 +1024,131 @@ function composite_view(
 		artwork?.power_drain ?? 0,
 		radar_on,
 		artwork?.sidebar ?? null,
+		artwork?.is_repair_mode ?? false,
+		artwork?.is_sell_mode ?? false,
+		artwork?.is_power_mode ?? false,
+		artwork?.is_waypoint_mode ?? false,
 	);
+	for (const label of tactical.labels) {
+		labels.push({
+			...label,
+			x: label.x + TAC_X,
+			y: label.y + TAC_Y,
+		});
+	}
 	if (radar && radar_on) {
 		Render_Radar(frame, radar, cells, tiles, shroud, artwork?.sprites ?? [], camera);
 	}
 	return { frame, labels };
+}
+
+function mode_mouse(artwork: MapArtwork, hover: MapSprite | null, cell: Point2D | null): number {
+	if (artwork.is_repair_mode) {
+		return hover && Can_Repair(artwork, hover) ? MOUSE_REPAIR : MOUSE_NO_REPAIR;
+	}
+	if (artwork.is_power_mode) {
+		return hover && Can_Toggle_Power(artwork, hover) ? MOUSE_TOGGLE_POWER : MOUSE_NO_TOGGLE_POWER;
+	}
+	if (hover && Can_Demolish(artwork, hover)) {
+		return hover.rtti === "building" ? MOUSE_SELL_BACK : MOUSE_SELL_UNIT;
+	}
+	if (cell && Can_Sell_Wall(artwork, cell)) {
+		return MOUSE_SELL_BACK;
+	}
+	return MOUSE_NO_SELL_BACK;
+}
+
+const WAYPOINT_LINE_STYLE = [true, true, true, true, true, false, false, false];
+
+function Draw_Waypoints(
+	frame: DSurface,
+	origin: Point2D,
+	artwork: MapArtwork,
+	heights: Map<string, number>,
+	shroud: ShroudMap | null,
+	mouse: MouseClass | null,
+): CanvasLabel[] {
+	const labels: CanvasLabel[] = [];
+	const palette = mouse?.Palette ?? artwork.unit_palette;
+	const shapes = mouse?.MouseShapes ?? null;
+	const color = Convert_Pixel(palette, 3);
+	const count = Math.max(1, mouse?.Get_Mouse_Frame_Count(MOUSE_WAYPOINT) ?? 1);
+	const speed = Math.max(1, artwork.production.waypoint_animation_speed);
+	const flag = (mouse?.Get_Mouse_Start_Frame(MOUSE_WAYPOINT) ?? 0) + (Math.trunc(artwork.frame / speed) % count);
+	let phase = (0x7fffffff - artwork.frame) % TIMER_SECOND;
+	for (let path = 0; path < artwork.paths.length; path++) {
+		const list = artwork.paths[path]!;
+		if (list.Waypoints.length === 0) {
+			continue;
+		}
+		const selected = path === artwork.selected_path;
+		for (let index = 0; index < list.Waypoints.length; index++) {
+			const waypoint = list.Waypoints[index]!;
+			if (shroud && !shroud.IsMapped(waypoint.x, waypoint.y)) {
+				continue;
+			}
+			const height = heights.get(`${waypoint.x},${waypoint.y}`) ?? 0;
+			const pixel = cell_pixel({ x: waypoint.x, y: waypoint.y, height });
+			const px = pixel.x + (ISO_TILE_PIXEL_W >> 1) - origin.x;
+			const py = pixel.y + (ISO_TILE_PIXEL_H >> 1) - origin.y;
+			if (shapes) {
+				blit_shape(frame, palette, shapes, flag, px, py, true);
+			}
+			labels.push({
+				x: px - 10,
+				y: py - 28,
+				width: 20,
+				height: 12,
+				text: `${index}`,
+				selected,
+			});
+			const next = Get_Next_Waypoint(list, waypoint);
+			if (!next) {
+				continue;
+			}
+			const next_height = heights.get(`${next.x},${next.y}`) ?? 0;
+			const next_pixel = cell_pixel({ x: next.x, y: next.y, height: next_height });
+			const nx = next_pixel.x + (ISO_TILE_PIXEL_W >> 1) - origin.x;
+			const ny = next_pixel.y + (ISO_TILE_PIXEL_H >> 1) - origin.y;
+			if (selected) {
+				phase = frame.draw_dashed_line(px, py, nx, ny, color, WAYPOINT_LINE_STYLE, phase);
+			} else {
+				frame.draw_line(px, py, nx, ny, color);
+			}
+		}
+	}
+	return labels;
+}
+
+function waypoint_mouse(artwork: MapArtwork, cell: Point2D, play: Rect, shift: boolean): number {
+	if (artwork.dragged_waypoint) {
+		return MOUSE_SELECT_WAYPOINT;
+	}
+	const waypoint = Waypoint_At(artwork.paths, cell);
+	const data = Fetch_Waypoint_Data(artwork.paths, waypoint);
+	const selected = artwork.selected_path >= 0 ? artwork.paths[artwork.selected_path] : null;
+	if (
+		!shift &&
+		waypoint &&
+		data &&
+		data.path === artwork.selected_path &&
+		selected &&
+		Can_Add_Waypoint_To_Path(artwork.paths, artwork.selected_path, artwork.production.max_waypoint_path_length) &&
+		Get_Next_Waypoint(selected, waypoint)
+	) {
+		return MOUSE_LOOP_WAYPOINT_PATH;
+	}
+	if (waypoint) {
+		return MOUSE_SELECT_WAYPOINT;
+	}
+	if (
+		artwork.selected_path !== PATH_NONE &&
+		Can_Add_Waypoint_To_Path(artwork.paths, artwork.selected_path, artwork.production.max_waypoint_path_length) &&
+		In_Radar(cell.x, cell.y, play)
+	) {
+		return MOUSE_PLACE_WAYPOINT;
+	}
+	return MOUSE_NO_PLACE_WAYPOINT;
 }
 
 function as_int16(value: number): number {
@@ -1105,7 +1383,7 @@ export async function Show_Tactical(
 		Bind_Path_Graph(artwork, cell_keys);
 	}
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
-	let selected: MapSprite | null = null;
+	let shift_down = false;
 	const exits: FactoryObject[] = [];
 	let exiting = false;
 	if (radar) {
@@ -1153,14 +1431,22 @@ export async function Show_Tactical(
 			palettes,
 			hud,
 			shroud,
-			selected,
+			artwork?.current_object ?? [],
 			radar,
 			ghost,
+			mouse,
 		);
 		if (mouse.MouseShapes) {
 			mouse.Draw_Mouse(view.frame, hud.palette);
 		}
 		present(canvas, view.frame, view.labels);
+	};
+
+	const sync_radar = (): void => {
+		if (!radar || !artwork) {
+			return;
+		}
+		radar.exists = (artwork.free_radar || artwork.has_radar) && artwork.power_output >= artwork.power_drain;
 	};
 
 	const game_frame = (): void => {
@@ -1170,14 +1456,24 @@ export async function Show_Tactical(
 		}
 		const ready = Factory_AI(artwork);
 		Gate_AI(artwork);
+		Display_AI(artwork);
+		const logic = artwork.sprites.slice();
+		for (const sprite of logic) {
+			if (artwork.sprites.includes(sprite)) {
+				Object_AI(artwork, sprite, play, cell_keys);
+			}
+		}
+		Bullet_AI(artwork);
 		Foot_AI(artwork, play, cell_keys, shroud);
 		Action_Line_AI();
 		for (const sprite of artwork.sprites) {
 			Anim_Logic(sprite);
 		}
+		House_AI(artwork);
 		if (ready.length) {
 			exits.push(...ready);
 		}
+		sync_radar();
 		if (!exiting && exits.length > 0) {
 			exiting = true;
 			const batch = exits.splice(0, exits.length);
@@ -1189,13 +1485,6 @@ export async function Show_Tactical(
 				exiting = false;
 			});
 		}
-	};
-
-	const sync_radar = (): void => {
-		if (!radar || !artwork) {
-			return;
-		}
-		radar.exists = (artwork.free_radar || artwork.has_radar) && artwork.power_output >= artwork.power_drain;
 	};
 
 	const system_tick = (): void => {
@@ -1217,6 +1506,8 @@ export async function Show_Tactical(
 			window.removeEventListener("mousemove", on_move);
 			window.removeEventListener("mouseup", on_up);
 			window.removeEventListener("keydown", on_key);
+			window.removeEventListener("keyup", on_keyup);
+			window.removeEventListener("blur", on_blur);
 			resolve();
 		};
 		const on_move = (event: MouseEvent): void => {
@@ -1229,11 +1520,21 @@ export async function Show_Tactical(
 				y: Math.min(SCREEN_H - 1, Math.max(0, point.y)),
 			};
 			canvas.style.cursor = mouse.MouseShapes && scroll.near_canvas ? "none" : previous_cursor;
+			shift_down = event.shiftKey;
+			if (scroll.mouse_down && artwork && (event.buttons & 1) !== 0) {
+				Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
+				if (artwork.is_rubber_band) {
+					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+				}
+			}
 		};
 		const on_down = (event: MouseEvent): void => {
 			event.preventDefault();
 			on_move(event);
 			if (event.button === 2) {
+				if (scroll.mouse_down) {
+					return;
+				}
 				if (artwork && mouse.Point.x >= TAC_W) {
 					const entry = Sidebar_Cameo_At(mouse.Point, hud, artwork.sidebar);
 					if (entry) {
@@ -1245,7 +1546,29 @@ export async function Show_Tactical(
 					artwork.production.pending = null;
 					return;
 				}
-				selected = null;
+				if (artwork?.is_repair_mode) {
+					Repair_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (artwork?.is_sell_mode) {
+					Sell_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (artwork?.is_power_mode) {
+					Power_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (artwork?.is_waypoint_mode) {
+					Waypoint_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (artwork) {
+					Unselect_All(artwork);
+				}
 				return;
 			}
 			if (event.button !== 0 || busy) {
@@ -1264,6 +1587,27 @@ export async function Show_Tactical(
 				return;
 			}
 			if (artwork && mouse.Point.x >= TAC_W) {
+				const button = Sidebar_Button_At(mouse.Point, hud);
+				if (button === "repair") {
+					Repair_Mode_Control(artwork, -1);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (button === "sell") {
+					Sell_Mode_Control(artwork, -1);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (button === "power") {
+					Power_Mode_Control(artwork, -1);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
+				if (button === "waypoint") {
+					Waypoint_Mode_Control(artwork, -1);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					return;
+				}
 				if (Sidebar_Click(mouse.Point, hud, artwork.sidebar)) {
 					return;
 				}
@@ -1272,7 +1616,7 @@ export async function Show_Tactical(
 					busy = true;
 					void Cameo_Left(directory, artwork, entry, play, cell_keys, shroud).then(() => {
 						if (artwork.production.pending) {
-							selected = null;
+							Unselect_All(artwork);
 						}
 					}).finally(() => {
 						busy = false;
@@ -1291,7 +1635,7 @@ export async function Show_Tactical(
 				busy = true;
 				void Place_Pending(directory, artwork, cell, play, shroud, cell_keys).then((placed) => {
 					if (placed) {
-						selected = null;
+						Unselect_All(artwork);
 						sync_radar();
 					}
 				}).finally(() => {
@@ -1299,34 +1643,111 @@ export async function Show_Tactical(
 				});
 				return;
 			}
-			scroll.mouse_down = true;
-			if (artwork) {
-				const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
-				if (
-					!hover &&
-					selected?.foot &&
-					over_tactical(mouse.Point.x, mouse.Point.y)
-				) {
-					const origin = view_origin(camera);
-					const cell = Pixel_To_Cell(
-						{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
-						origin,
-						heights,
-						bridges,
-					);
-					Assign_Move(artwork, selected, cell, play, cell_keys);
-				} else {
-					selected = hover;
+			if (over_tactical(mouse.Point.x, mouse.Point.y)) {
+				scroll.mouse_down = true;
+				if (artwork) {
+					Mouse_Left_Press(artwork, tactical_mouse(mouse.Point));
 				}
 			}
 		};
-		const on_up = (): void => {
+		const on_up = (event: MouseEvent): void => {
+			const was_down = scroll.mouse_down;
 			scroll.mouse_down = false;
+			if (!artwork) {
+				return;
+			}
+			Waypoint_Release(artwork);
+			if (event.button !== 0 || !was_down) {
+				return;
+			}
+			if (artwork.is_rubber_band) {
+				if (!shift_down) {
+					Unselect_All(artwork);
+				}
+				Select_Rubber_Band(artwork);
+				artwork.is_rubber_band = false;
+				mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+				artwork.is_tentative = false;
+				return;
+			}
+			artwork.is_tentative = false;
+			const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+			const origin = view_origin(camera);
+			const cell = over_tactical(mouse.Point.x, mouse.Point.y)
+				? Pixel_To_Cell(
+					{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+					origin,
+					heights,
+					bridges,
+				)
+				: null;
+			const chosen = Best_Selected(artwork);
+			if (artwork.is_repair_mode || artwork.is_sell_mode || artwork.is_power_mode) {
+				Mode_Action(artwork, hover, cell);
+				Unselect_All(artwork);
+			} else if (artwork.is_waypoint_mode) {
+				if (cell) {
+					Waypoint_Click(artwork, cell, play, cell_keys, event.shiftKey);
+				}
+				Unselect_All(artwork);
+			} else if (hover) {
+				const attacker = artwork.current_object[0];
+				if (attacker && What_Action(artwork, attacker, hover) === "attack") {
+					for (const sprite of artwork.current_object) {
+						if (Can_Player_Fire(artwork, sprite)) {
+							Assign_Target(sprite, hover, true);
+						}
+					}
+				} else if (
+					shift_down &&
+					artwork.current_object.length > 0 &&
+					artwork.current_object[0]!.owned &&
+					hover.owned
+				) {
+					if (hover.is_selected) {
+						Unselect(artwork, hover);
+					} else {
+						Select(artwork, hover);
+					}
+				} else {
+					Unselect_All(artwork);
+					Select(artwork, hover);
+				}
+			} else if (cell && chosen?.foot && Waypoint_At(artwork.paths, cell)) {
+				for (const sprite of artwork.current_object) {
+					if (sprite.foot) {
+						Follow_Waypoint(artwork, sprite, cell, play, cell_keys);
+					}
+				}
+			} else if (chosen?.foot && cell) {
+				Assign_Group_Move(artwork, cell, play, cell_keys);
+			} else if (cell && Waypoint_At(artwork.paths, cell)) {
+				const data = Fetch_Waypoint_Data(artwork.paths, Waypoint_At(artwork.paths, cell));
+				if (data) {
+					artwork.selected_path = data.path;
+				}
+				Waypoint_Mode_Control(artwork, 1, true);
+				mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+				Unselect_All(artwork);
+			} else {
+				Unselect_All(artwork);
+			}
+		};
+		const on_blur = (): void => {
+			scroll.mouse_down = false;
+			if (artwork) {
+				Abort_Drag_Select(artwork);
+				mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+			}
 		};
 		const on_menu = (event: Event): void => {
 			event.preventDefault();
 		};
+		const on_keyup = (event: KeyboardEvent): void => {
+			shift_down = event.shiftKey;
+		};
 		const on_key = (event: KeyboardEvent): void => {
+			shift_down = event.shiftKey;
 			if (cancelled()) {
 				finish();
 				return;
@@ -1334,6 +1755,30 @@ export async function Show_Tactical(
 			if (event.key === "Escape") {
 				if (artwork?.production.pending) {
 					artwork.production.pending = null;
+					event.preventDefault();
+					return;
+				}
+				if (artwork?.is_repair_mode) {
+					Repair_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					event.preventDefault();
+					return;
+				}
+				if (artwork?.is_sell_mode) {
+					Sell_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					event.preventDefault();
+					return;
+				}
+				if (artwork?.is_power_mode) {
+					Power_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+					event.preventDefault();
+					return;
+				}
+				if (artwork?.is_waypoint_mode) {
+					Waypoint_Mode_Control(artwork, 0);
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 					event.preventDefault();
 					return;
 				}
@@ -1367,20 +1812,16 @@ export async function Show_Tactical(
 				system_tick();
 			}
 			camera = scroll_edge(mouse, camera, play, local, scroll, now);
-			if (
-				artwork &&
-				(mouse.CurrentMouseShape === MOUSE_NORMAL ||
-					mouse.CurrentMouseShape === MOUSE_CAN_SELECT ||
-					mouse.CurrentMouseShape === MOUSE_CAN_MOVE ||
-					mouse.CurrentMouseShape === MOUSE_NO_MOVE)
-			) {
-				if (artwork.production.pending || over_radar(mouse.Point.x, mouse.Point.y, radar)) {
+			if (artwork && scroll.mouse_down) {
+				Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
+			}
+			if (artwork) {
+				if (artwork.is_rubber_band) {
 					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
-				} else {
-					const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
-					if (hover) {
-						mouse.Override_Mouse_Shape(MOUSE_CAN_SELECT, false);
-					} else if (selected?.foot && over_tactical(mouse.Point.x, mouse.Point.y)) {
+				} else if (artwork.is_repair_mode || artwork.is_sell_mode || artwork.is_power_mode) {
+					if (artwork.production.pending || over_radar(mouse.Point.x, mouse.Point.y, radar) || mouse.Point.x >= TAC_W) {
+						mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+					} else {
 						const origin = view_origin(camera);
 						const cell = Pixel_To_Cell(
 							{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
@@ -1388,12 +1829,76 @@ export async function Show_Tactical(
 							heights,
 							bridges,
 						);
-						mouse.Override_Mouse_Shape(
-							Can_Move_To(artwork, selected, cell, play, cell_keys) ? MOUSE_CAN_MOVE : MOUSE_NO_MOVE,
-							false,
-						);
-					} else {
+						const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+						mouse.Override_Mouse_Shape(mode_mouse(artwork, hover, cell), false);
+					}
+				} else if (artwork.is_waypoint_mode) {
+					if (artwork.production.pending || over_radar(mouse.Point.x, mouse.Point.y, radar) || mouse.Point.x >= TAC_W) {
 						mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+					} else {
+						const origin = view_origin(camera);
+						const cell = Pixel_To_Cell(
+							{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+							origin,
+							heights,
+							bridges,
+						);
+						if (artwork.dragged_waypoint) {
+							Waypoint_Drag(artwork, cell, play, cell_keys);
+						}
+						mouse.Override_Mouse_Shape(waypoint_mouse(artwork, cell, play, shift_down), false);
+					}
+				} else if (
+					mouse.CurrentMouseShape === MOUSE_NORMAL ||
+					mouse.CurrentMouseShape === MOUSE_CAN_SELECT ||
+					mouse.CurrentMouseShape === MOUSE_CAN_MOVE ||
+					mouse.CurrentMouseShape === MOUSE_NO_MOVE ||
+					mouse.CurrentMouseShape === MOUSE_CAN_ATTACK ||
+					mouse.CurrentMouseShape === MOUSE_STAY_ATTACK ||
+					mouse.CurrentMouseShape === MOUSE_FOLLOW_WAYPOINT ||
+					mouse.CurrentMouseShape === MOUSE_ENTER_WAYPOINT_MODE ||
+					mouse.CurrentMouseShape === MOUSE_PLACE_WAYPOINT ||
+					mouse.CurrentMouseShape === MOUSE_NO_PLACE_WAYPOINT ||
+					mouse.CurrentMouseShape === MOUSE_SELECT_WAYPOINT ||
+					mouse.CurrentMouseShape === MOUSE_LOOP_WAYPOINT_PATH
+				) {
+					if (artwork.production.pending || over_radar(mouse.Point.x, mouse.Point.y, radar)) {
+						mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+					} else {
+						const origin = view_origin(camera);
+						const cell = over_tactical(mouse.Point.x, mouse.Point.y)
+							? Pixel_To_Cell(
+								{ x: mouse.Point.x - TAC_X, y: mouse.Point.y - TAC_Y },
+								origin,
+								heights,
+								bridges,
+							)
+							: null;
+						const hover = hover_sprite(artwork, mouse.Point, camera, heights, bridges, shroud);
+						const waypoint = cell ? Waypoint_At(artwork.paths, cell) : null;
+						const chosen = Best_Selected(artwork);
+						if (hover) {
+							const attacker = artwork.current_object[0];
+							if (attacker && What_Action(artwork, attacker, hover) === "attack") {
+								mouse.Override_Mouse_Shape(
+									In_Range_Of(artwork, attacker, hover) ? MOUSE_STAY_ATTACK : MOUSE_CAN_ATTACK,
+									false,
+								);
+							} else {
+								mouse.Override_Mouse_Shape(MOUSE_CAN_SELECT, false);
+							}
+						} else if (waypoint && chosen?.foot) {
+							mouse.Override_Mouse_Shape(MOUSE_FOLLOW_WAYPOINT, false);
+						} else if (waypoint) {
+							mouse.Override_Mouse_Shape(MOUSE_ENTER_WAYPOINT_MODE, false);
+						} else if (chosen?.foot && cell) {
+							mouse.Override_Mouse_Shape(
+								Can_Move_To(artwork, chosen, cell, play, cell_keys) ? MOUSE_CAN_MOVE : MOUSE_NO_MOVE,
+								false,
+							);
+						} else {
+							mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
+						}
 					}
 				}
 			}
@@ -1405,6 +1910,8 @@ export async function Show_Tactical(
 		window.addEventListener("mousemove", on_move);
 		window.addEventListener("mouseup", on_up);
 		window.addEventListener("keydown", on_key);
+		window.addEventListener("keyup", on_keyup);
+		window.addEventListener("blur", on_blur);
 		if (cancelled()) {
 			finish();
 			return;

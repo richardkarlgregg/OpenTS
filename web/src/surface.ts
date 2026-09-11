@@ -99,6 +99,52 @@ export class DSurface {
 		}
 	}
 
+	draw_dashed_line(
+		x0: number,
+		y0: number,
+		x1: number,
+		y1: number,
+		color: number,
+		pattern: readonly boolean[],
+		offset: number,
+	): number {
+		const packed = color & 0xffff;
+		const period = Math.max(1, pattern.length);
+		let dx = Math.abs(x1 - x0);
+		let dy = -Math.abs(y1 - y0);
+		const sx = x0 < x1 ? 1 : -1;
+		const sy = y0 < y1 ? 1 : -1;
+		let err = dx + dy;
+		let x = x0;
+		let y = y0;
+		let step = offset % period;
+		if (step < 0) {
+			step += period;
+		}
+		for (;;) {
+			if (pattern[step]) {
+				this.put_pixel(x, y, packed);
+			}
+			step += 1;
+			if (step >= period) {
+				step = 0;
+			}
+			if (x === x1 && y === y1) {
+				break;
+			}
+			const e2 = err * 2;
+			if (e2 >= dy) {
+				err += dy;
+				x += sx;
+			}
+			if (e2 <= dx) {
+				err += dx;
+				y += sy;
+			}
+		}
+		return step;
+	}
+
 	draw_rect(x: number, y: number, width: number, height: number, color: number): void {
 		if (width <= 0 || height <= 0) {
 			return;

@@ -14,6 +14,7 @@ import { Find_Path_Regular, type PathEnter } from "./astar";
 import type { Point2D } from "./ini";
 import { ISO_TILE_PIXEL_H, ISO_TILE_PIXEL_W } from "./isotile";
 import { graph_cell, tube_at, type PathGraph } from "./zone";
+import { PATH_NONE } from "./waypoint";
 
 export const CELL_LEPTON = 256;
 export const FACING_COUNT = 8;
@@ -53,7 +54,13 @@ export type FootState = {
 	stage: number;
 	timer: number;
 	max_speed: number;
+	height_agl: number;
+	current_path: number;
+	next_waypoint: number;
+	waypoint_target: Point2D | null;
 };
+
+export type ClaimHead = (cell: Point2D) => Point2D | null;
 
 export function Scale_To_256(val: number): number {
 	const speed = ((val * (MPH_LIGHT_SPEED + 1)) / 100) | 0;
@@ -111,6 +118,10 @@ export function Make_Foot(cell: Point2D, max_speed: number): FootState {
 		stage: 0,
 		timer: WALK_RATE,
 		max_speed: Math.max(1, max_speed),
+		height_agl: 0,
+		current_path: PATH_NONE,
+		next_waypoint: 0,
+		waypoint_target: null,
 	};
 }
 
@@ -190,6 +201,7 @@ export function Movement_AI(
 	can_path?: PathEnter,
 	graph: PathGraph | null = null,
 	avoid = 0,
+	claim_head?: ClaimHead,
 ): boolean {
 	if (!foot.moving && !foot.head) {
 		return false;
@@ -201,9 +213,16 @@ export function Movement_AI(
 		}
 		const here = Coord_Cell(foot.lx, foot.ly);
 		if (here.x === foot.dest.x && here.y === foot.dest.y) {
-			const at = Cell_Center(foot.dest);
-			foot.lx = at.x;
-			foot.ly = at.y;
+			if (claim_head) {
+				const claimed = claim_head(foot.dest);
+				if (claimed && (claimed.x !== foot.lx || claimed.y !== foot.ly)) {
+					foot.head = claimed;
+					return true;
+				}
+				if (!claimed) {
+					return false;
+				}
+			}
 			foot.dest = null;
 			foot.moving = false;
 			foot.path = [];
@@ -236,7 +255,11 @@ export function Movement_AI(
 				foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
 				return false;
 			}
-			foot.head = Cell_Center(exit);
+			const claimed = claim_head ? claim_head(exit) : Cell_Center(exit);
+			if (!claimed) {
+				return false;
+			}
+			foot.head = claimed;
 			return true;
 		}
 		const next = Adjacent_Cell(here, dir);
@@ -244,10 +267,21 @@ export function Movement_AI(
 			if (try_gate?.(next)) {
 				return false;
 			}
+			if (foot.dest.x === next.x && foot.dest.y === next.y) {
+				return false;
+			}
 			foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
 			return false;
 		}
-		foot.head = Cell_Center(next);
+		const claimed = claim_head ? claim_head(next) : Cell_Center(next);
+		if (!claimed) {
+			if (foot.dest.x === next.x && foot.dest.y === next.y) {
+				return false;
+			}
+			foot.path = Find_Path(here, foot.dest, walkable, 200, graph, avoid);
+			return false;
+		}
+		foot.head = claimed;
 		return true;
 	}
 	const dx = foot.head.x - foot.lx;
@@ -275,4 +309,22 @@ export function Movement_AI(
 		foot.timer = WALK_RATE;
 	}
 	return true;
+}
+
+const FLY_CLIMB = 16;
+
+export function Fly_AI(foot: FootState, flight_level: number): boolean {
+	const air_enter: PathEnter = () => true;
+	const moved = Movement_AI(foot, air_enter, undefined, air_enter, null, 0);
+	if (foot.moving || foot.head) {
+		if (foot.height_agl < flight_level) {
+			foot.height_agl = Math.min(flight_level, foot.height_agl + FLY_CLIMB);
+		}
+		return true;
+	}
+	if (foot.height_agl > 0) {
+		foot.height_agl = Math.max(0, foot.height_agl - FLY_CLIMB);
+		return true;
+	}
+	return moved;
 }

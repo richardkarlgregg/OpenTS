@@ -48,6 +48,17 @@ game.
   buildings that convert to overlay are not drawn. Infantry use the ART
   `Sequence` Ready frames and `HumanShape` facing; SHP vehicles use
   `Shape_Facing_Index` stand frames. House `Color=` remaps techno objects.
+  Campaign `HouseClass::Read_All` builds live houses from RULES type order
+  (Neutral/Special when the map lists them); `Is_Ally` is the house bitmask;
+  techno rows with no live house are skipped. `TechnoClass::AI` fires
+  `Primary=` through `Can_Fire` / `Fire_At`: `Inviso` warheads apply
+  `Take_Damage` / `Modify_Damage` at once, other projectiles travel at
+  `Speed=` then explode. Guard auto-acquires in `ThreatRange`; a player
+  `ACTION_ATTACK` (`MOUSE_CAN_ATTACK` / `MOUSE_STAY_ATTACK`) chases out of
+  range. Homing, arcing gravity, particles, lasers, and explosion SHPs are
+  not ported. `HouseClass::AI` still only recalcs power; computer base-building
+  and triggers are not. `Assign_Handicap` is not. `LogicClass` still runs
+  factories before objects.
   Voxel units load `.VXL`/`.HVA` (plus `TUR`/`BARL`/`W` pieces) and project
   through the isometric view matrix and body facing. The view is the 640x400
   in-game layout: tabs and credits, `RADAR.SHP` frame 0, `SIDE1`/`SIDE2`/`SIDE3`/`ADDON`
@@ -71,9 +82,16 @@ game.
   `Render_Coord` (origin-cell north-west corner) and draw `TechnoClass` 3D
   lepton brackets with `Draw_Depth_Shaded_Line` in `Convert_Pixel(WHITE)`
   (unit palette index 15). Terrain Z for those brackets is `Get_Height` at
-  the centre lepton (cell height plus TMP `RampType`). Infantry and other
+  the centre lepton (cell height plus TMP `RampType`).   Infantry and other
   units blit `SELECT.SHP` frames 2 and 3, or 6 and 7 when the scenario INI
-  veteran token is set, then `PIPS.SHP` health pips. Selection is drawn
+  veteran token is set, then `PIPS.SHP` health pips from
+  `TechnoClass::Draw_Health_Bar` through `NormalDrawer` (`PALETTE.PAL`).
+  `HealthRatio` is `Strength / MaxStrength`.
+  Scenario INI health is 0–256 (`MaxStrength * token / 256`, snapped to full
+  if within 3 of max). Buildings at or below `ConditionYellow` use
+  `Shape_Number` damage frames and `ActiveAnimDamaged`. Pip colour is green
+  (frame 9 / 1), yellow (10 / 2), or red (11 / 4) from those thresholds.
+  Selection is drawn
   before the shroud pass so the shroud darkens it the way `SHAPE_ALPHA`
   would. `Pixel_To_Lepton` uses `PixelToCoordMatrix`. Bridge overlay cells
   lift `Pixel_To_Cell` by `BRIDGE_CELL_HEIGHT`. Cloak, fog of war, limpet
@@ -88,15 +106,24 @@ game.
   `Place_Object`. Right-click suspends, then abandons (refund `Cost -
   Balance`).   Completed infantry and vehicles leave through
   `BuildingClass::Exit_Object` (`Find_Exit_Cell`, GDI barracks prefers
-  origin+(1,2) plus `ExitCoord=`). Infantry and vehicles auto-place on
+  origin+(1,2) plus `ExitCoord=`). `Can_Enter_Cell` must return `MOVE_OK`
+  (no vehicle occupy; infantry not `0x1C`). Barracks that are not
+  `Armory=` or `WeaponsFactory=` wait on radio (`In_Radio_Contact`) until
+  the previous foot has arrived; a blocked door scatters idle occupiers.
+  Infantry and vehicles auto-place on
   `FactoryClass::Has_Completed` (`StripClass::AI` `PLACE`/`CELL_NONE`);
   buildings still wait for a Ready click. Each queued infantry or vehicle
   also auto-exits when its turn completes. Non-building cameos queue up to
   RULES `[General] MaximumQueuedObjects` (default 5); buildings cannot.
   Queue counts print at `QUEUE_COUNT_X_OFFSET`. They walk with
-  `WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
-  `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Path
-  search is `AStarClass::Find_Path` (hierarchical subzones with
+	`WalkLocomotionClass` (`Basic_Path` / `Adjacent_Cell` facings,
+  `Move_Coord` toward `HeadToCoord`, arrive within 17 leptons). Infantry
+  `Mark_Head_To` takes `Closest_Free_Spot` (spots 2, 3, and 4; the cell
+  centre and NW are never free), so three infantry share a cell. Vehicles
+  set `Flag.Occupy.Vehicle` and wait rather than stack. Path search
+  ignores occupy (`MOVE_TEMP` cost); the step does not, and idle occupiers
+  `Scatter` (`Nearby_Location` 1x1). A cell whose infantry bits are
+  `0x1C` scatters everyone on it. Search is `AStarClass::Find_Path` (hierarchical subzones with
   `Region_Threat` * `ThreatAvoidanceCoefficient` on rough/coarse edges,
   up to five banned-edge retries after `Ban_Blocked_Subzone_Edges`, then
   cell A* with a Euclidean heuristic, facing tie-break costs, and
@@ -114,20 +141,75 @@ game.
   `MapClass::Try_Open_Gate` / `BuildingClass::Open_Gate` finishes
   (`GateStages`, `DeployTime`, `GateCloseDelay`). Gate `Sort_Y` is 16
   leptons earlier so infantry and vehicles draw in front. Owned techno
-  `Look()` / `Map.Sight_From` on cell change. Left-click a selected
-  foot unit on mapped ground to `Assign_Destination`. Right-click on
+  `Look()` / `Map.Sight_From` on cell change. Left-release on a
+  selectable techno `Select()`s it into `CurrentObject` (leaders go to the
+  head). Shift (`KeySelect1`/`KeySelect2`) toggles while a player unit is
+  already selected. Left-release a selected foot unit on mapped ground to
+  `Assign_Destination` for every selected foot. `DisplayClass` group move
+  sorts by distance to the group centroid, sends the first unit to the
+  click cell, and walks later units along the formation vector from the
+  click, skipping cells already reserved for this order. Units already on
+  the same cell copy that destination. Right-click on
   empty tactical (`Mouse_Right_Release`) is `Unselect_All`. With a foot unit
   selected, empty tactical cells use `MOUSE_CAN_MOVE` or `MOUSE_NO_MOVE`.
-  `FootClass::Draw_Action_Line` draws the movement line (`RGB(0,170,0)`)
-  for `ActionLineTimer` (25) frames after the order. Escape cancels placement first, then leaves the map. Strip
+  `DisplayClass::Mouse_Left_Press` flags `IsTentative`; once the pointer
+  moves more than 4 pixels (`Point2D::Length`) `IsRubberBand` starts
+  `Tactical::Start_Rubber_Band` (skipped in waypoint mode, which still
+  consumes the drag). `Mouse_Left_Held` clamps the loose corner to the
+  tactical rect. Left-release without Shift `Unselect_All`s, then
+  `Select_Rubber_Band` / `Select_These` / `Bandbox_Selection_Callback`:
+  owned selectable infantry, units, and aircraft, plus buildings with
+  `UndeploysInto` that are not `ConstructionYard` or `IsMobileWar`. The box
+  is `NormalDrawer->Convert_Pixel(15)`. `FootClass::Draw_Action_Line` draws the movement line (`RGB(0,170,0)`)
+  for `ActionLineTimer` (25) frames after the order. Sidebar repair, sell, and
+  power buttons call `Repair_Mode_Control` / `Sell_Mode_Control` /
+  `Power_Mode_Control` (`0` off, `1` on, `-1` toggle; refused without an owned
+  building; each mode clears the others and the selection). Hover uses
+  `MOUSE_REPAIR` / `MOUSE_SELL_BACK` / `MOUSE_SELL_UNIT` /
+  `MOUSE_TOGGLE_POWER`, or the barred frames. Left-click toggles
+  `BuildingClass::Repair(-1)`, `Sell_Back` (instant `Cost * RefundPercent`, no
+  deconstruction SHP), or `Turn_On`/`Turn_Off`. Hit points are integer
+  `Strength` against the type max. `Can_Repair` is an owned building with
+  `Repairable=yes`, not `Considered_Vehicle` (`UndeploysInto` set and not
+  `ConstructionYard`), and `Strength` neither 0 nor max. `Can_Toggle_Power`
+  needs `TogglePower`, (`Drain>0` or `Powered`), selectable, and not a
+  vehicle. `Can_Demolish` sells buildings the same way; units and aircraft
+  only within `CELL_LEPTON/2` of an owned `UnitRepair=yes` occupy-center
+  (radio tether is not ported). `Repair_AI` spends repair cost every
+  `RepairRate * TICKS_PER_MINUTE` frames. Overlay-pack walls have no cell
+  Owner, so they are not sold. Completed aircraft leave through
+  `BuildingClass::Exit_Object`: a free helipad docks at occupy-center; a busy
+  pad spawns on the local-rect edge at `FlightLevel` and
+  `Assign_Destination` to the pad. Aircraft `Fly_AI` climbs or descends 16
+  leptons per frame and ignores ground occupy. The waypoint button calls
+  `Waypoint_Mode_Control` (`0` off, `1` on, `-1` toggle; starts
+  `HouseClass::New_Waypoint_Path`, refused when all 12 paths are in use).
+  Those modes `Unselect_All`, so `ScrollClass::What_Action` only applies
+  them when nothing is selected. Hover uses `MOUSE_PLACE_WAYPOINT` /
+  `MOUSE_NO_PLACE_WAYPOINT` / `MOUSE_SELECT_WAYPOINT` /
+  `MOUSE_LOOP_WAYPOINT_PATH`. Left-click places a marker
+  (`MaxWaypointPathLength`, default 15), picks one up to drag, or loops an
+  earlier point of the selected path; Shift (`KeySelect1`/`KeySelect2`)
+  skips the loop and selects or drags instead. `Tactical::Draw_Waypoints`
+  runs before `Draw_Objects`, blits
+  `Get_Mouse_Start_Frame(MOUSE_WAYPOINT) + (WaypointAnimCounter %
+  Get_Mouse_Frame_Count)` (`WaypointAnimationSpeed`, default 12), index
+  labels, and path lines in `MouseDrawer->Convert_Pixel(3)`. The selected
+  path is a 5-on/3-off dash whose phase starts at
+  `(0x7FFFFFFF - Frame) % TICKS_PER_SECOND`. A selected foot unit on an
+  empty marker cell uses `MOUSE_FOLLOW_WAYPOINT` and
+  `FootClass::Set_Waypoint_Path`; a hover object still selects. Arrival
+  walks `Get_Next_Waypoint`. A marker with nothing selected enters waypoint
+  mode on that path. Right-click or Escape cancels
+  placement first, then repair, sell, power, or waypoint. Strip
   scroll arrows (`R-UP.SHP` / `R-DN.SHP`) move `TopIndex`. Edge scroll is
   `ScrollClass::Scroll_Edge`
   (arrow cursors `MOUSE_N`…`MOUSE_NW`, barred when `Scroll_Dir` cannot
   move). The camera is `TacticalCoord` (view center); `TacPixel` subtracts
   half the tactical rect before blit, and `Tactical_Position_Limits` clamp
   that center. Arrow keys also pan. Escape returns to the menu. Skirmish lists
-  `MISSIONS.PKT` and loose `.MPR` maps the same way. Aircraft factory exit, movies,
-  and save/load are not playable yet.
+  `MISSIONS.PKT` and loose `.MPR` maps the same way. Movies and save/load are
+  not playable yet.
 
 ## Commands
 

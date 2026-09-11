@@ -12,6 +12,7 @@
 
 import type { CameoKind } from "./sidebar";
 import { TICKS_PER_MINUTE } from "./stimer";
+import type { FootState } from "./walk";
 
 export const STEP_COUNT = 54;
 
@@ -33,6 +34,7 @@ export class FactoryClass {
 	Timer = 0;
 	IsDifferent = false;
 	IsExiting = false;
+	ExitingFoot: FootState | null = null;
 	max_queue = 5;
 
 	Fetch_Stage(): number {
@@ -70,6 +72,7 @@ export class FactoryClass {
 		this.Balance = object.cost;
 		this.IsDifferent = true;
 		this.IsExiting = false;
+		this.ExitingFoot = null;
 		return true;
 	}
 
@@ -102,6 +105,7 @@ export class FactoryClass {
 		this.IsSuspended = true;
 		this.Object = null;
 		this.IsDifferent = true;
+		this.ExitingFoot = null;
 		return refund;
 	}
 

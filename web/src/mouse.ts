@@ -22,6 +22,22 @@ export const MOUSE_NO_N = 9;
 export const MOUSE_CAN_SELECT = 17;
 export const MOUSE_CAN_MOVE = 18;
 export const MOUSE_NO_MOVE = 19;
+export const MOUSE_STAY_ATTACK = 20;
+export const MOUSE_CAN_ATTACK = 21;
+export const MOUSE_SELL_BACK = 30;
+export const MOUSE_SELL_UNIT = 31;
+export const MOUSE_NO_SELL_BACK = 32;
+export const MOUSE_REPAIR = 34;
+export const MOUSE_NO_REPAIR = 35;
+export const MOUSE_WAYPOINT = 36;
+export const MOUSE_PLACE_WAYPOINT = 37;
+export const MOUSE_NO_PLACE_WAYPOINT = 38;
+export const MOUSE_SELECT_WAYPOINT = 39;
+export const MOUSE_ENTER_WAYPOINT_MODE = 40;
+export const MOUSE_FOLLOW_WAYPOINT = 41;
+export const MOUSE_LOOP_WAYPOINT_PATH = 46;
+export const MOUSE_TOGGLE_POWER = 51;
+export const MOUSE_NO_TOGGLE_POWER = 52;
 export const MOUSE_COUNT = 67;
 
 const MOUSE_HOTSPOT_MIN = 0;
@@ -136,6 +152,14 @@ export class MouseClass {
 			return control.SmallFrame + this.Frame;
 		}
 		return control.StartFrame + this.Frame;
+	}
+
+	Get_Mouse_Start_Frame(mouse: number): number {
+		return MouseControl[mouse]?.StartFrame ?? 0;
+	}
+
+	Get_Mouse_Frame_Count(mouse: number): number {
+		return MouseControl[mouse]?.FrameCount ?? 1;
 	}
 
 	Get_Mouse_Hotspot(mouse: number): Point2D {
