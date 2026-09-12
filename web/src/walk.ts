@@ -122,6 +122,7 @@ export type FootState = {
 	is_drop_pod: boolean;
 	drop_pod_dir: number;
 	drop_pod_dest: Point2D | null;
+	is_on_bridge: boolean;
 };
 
 export type ClaimHead = (cell: Point2D) => Point2D | null;
@@ -206,6 +207,7 @@ export function Make_Foot(cell: Point2D, max_speed: number, rot = 0): FootState 
 		is_drop_pod: false,
 		drop_pod_dir: 0,
 		drop_pod_dest: null,
+		is_on_bridge: false,
 	};
 }
 
@@ -216,6 +218,25 @@ export function lepton_offset(lx: number, ly: number): { ox: number; oy: number 
 		ox: Math.trunc((dx * (ISO_TILE_PIXEL_W >> 1) - dy * (ISO_TILE_PIXEL_W >> 1)) / CELL_LEPTON),
 		oy: Math.trunc((dx * (ISO_TILE_PIXEL_H >> 1) + dy * (ISO_TILE_PIXEL_H >> 1)) / CELL_LEPTON),
 	};
+}
+
+export function Update_On_Bridge(
+	foot: FootState,
+	old_cell: Point2D,
+	new_cell: Point2D,
+	terrain: Map<string, CellTerrain>,
+	graph: PathGraph | null,
+): void {
+	const old_height = terrain_of(terrain, old_cell).height;
+	const new_height = terrain_of(terrain, new_cell).height;
+	const old_under = graph ? (graph_cell(graph, old_cell)?.under_bridge ?? false) : false;
+	const new_under = graph ? (graph_cell(graph, new_cell)?.under_bridge ?? false) : false;
+	if (new_height === old_height - BRIDGE_CELL_HEIGHT && new_under) {
+		foot.is_on_bridge = true;
+	}
+	if (!new_under && old_under) {
+		foot.is_on_bridge = false;
+	}
 }
 
 export function Apply_Coord(foot: FootState): { x: number; y: number; ox: number; oy: number } {

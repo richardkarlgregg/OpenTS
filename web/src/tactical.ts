@@ -121,6 +121,7 @@ import { Theme } from "./theme";
 import { Menu_Click_Sound, Set_Game_Active, Set_Sound_View } from "./voc";
 import { Speak_Tick } from "./vox";
 import { Cell_Center } from "./walk";
+import { graph_cell } from "./zone";
 import {
 	Can_Add_Waypoint_To_Path,
 	Fetch_Waypoint_Data,
@@ -148,6 +149,7 @@ const CELL_LEPTON_DIAG = Math.sqrt(CELL_LEPTON * CELL_LEPTON * 2);
 const LEVEL_LEPTON_H = Math.trunc((Math.tan(Math.PI / 2 - Math.PI / 3) * CELL_LEPTON_DIAG) / 2);
 const Z_PIXELS_PER_LEPTON = Math.sin(Math.PI / 3) * (ISO_TILE_PIXEL_W / CELL_LEPTON_DIAG);
 const BRIDGE_CELL_HEIGHT = 4;
+const BRIDGE_LEPTON_HEIGHT = Math.trunc(LEVEL_LEPTON_H * BRIDGE_CELL_HEIGHT + 0.5);
 const WHITE = 15;
 
 type Selectable = {
@@ -535,7 +537,7 @@ function sprite_center(
 	origin: Point2D,
 	heights: Map<string, number>,
 ): Point2D {
-	const height = heights.get(`${sprite.x},${sprite.y}`) ?? 0;
+	const height = (heights.get(`${sprite.x},${sprite.y}`) ?? 0) + (sprite.foot?.is_on_bridge ? BRIDGE_CELL_HEIGHT : 0);
 	const pixel = cell_pixel({ x: sprite.x, y: sprite.y, height });
 	const fly = Z_Lepton_To_Pixel(sprite.foot?.height_agl ?? 0);
 	return {
@@ -683,12 +685,21 @@ function draw_move_lines(
 			continue;
 		}
 		const dest = Cell_Center(foot.dest);
+		const dest_under = artwork.path_graph ? (graph_cell(artwork.path_graph, foot.dest)?.under_bridge ?? false) : false;
 		const start = Coord_To_Pixel(
-			{ x: foot.lx, y: foot.ly, z: Get_Height({ x: foot.lx, y: foot.ly }, heights, ramps) },
+			{
+				x: foot.lx,
+				y: foot.ly,
+				z: Get_Height({ x: foot.lx, y: foot.ly }, heights, ramps) + (foot.is_on_bridge ? BRIDGE_LEPTON_HEIGHT : 0),
+			},
 			origin,
 		);
 		const end = Coord_To_Pixel(
-			{ x: dest.x, y: dest.y, z: Get_Height({ x: dest.x, y: dest.y }, heights, ramps) },
+			{
+				x: dest.x,
+				y: dest.y,
+				z: Get_Height({ x: dest.x, y: dest.y }, heights, ramps) + (dest_under ? BRIDGE_LEPTON_HEIGHT : 0),
+			},
 			origin,
 		);
 		frame.draw_line(start.x, start.y, end.x, end.y, color);
@@ -776,7 +787,8 @@ function select_center(sprite: MapSprite, heights: Map<string, number>, ramps: M
 	const box = sprite.select?.kind === "box" ? sprite.select : null;
 	const x = sprite.x * CELL_LEPTON + (box ? Math.trunc(box.lx / 2) : CELL_LEPTON / 2);
 	const y = sprite.y * CELL_LEPTON + (box ? Math.trunc(box.ly / 2) : CELL_LEPTON / 2);
-	return { x, y, z: Get_Height({ x, y }, heights, ramps) };
+	const z = Get_Height({ x, y }, heights, ramps) + (sprite.foot?.is_on_bridge ? BRIDGE_LEPTON_HEIGHT : 0);
+	return { x, y, z };
 }
 
 function add_coord(center: Coord, x: number, y: number, z: number): Coord {

@@ -191,6 +191,7 @@ import {
 	SPEED_WINGED,
 	Scale_To_256,
 	TUNNEL,
+	Update_On_Bridge,
 	lepton_offset,
 	terrain_of,
 	type CellTerrain,
@@ -6337,6 +6338,7 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			}
 		}
 		if (placed.x !== before.x || placed.y !== before.y) {
+			Update_On_Bridge(foot, before, placed, artwork.terrain, artwork.path_graph);
 			resorted = true;
 			Look(artwork, sprite, shroud);
 			enter_cell(artwork, shroud, sprite, placed);

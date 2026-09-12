@@ -233,7 +233,11 @@ game.
   `CliffBackImpassability=2` marks cells 4+ below listed neighbours as
   `LAND_ROCK` and does not block a traversable deck cell.
   `FootClass::Can_Reach` allows height 0, height 1 when the lower cell
-  has a TMP ramp, or height 4 onto a traversable deck. TMP `TileType`
+  has a TMP ramp, or height 4 onto a traversable deck.
+  `WalkLocomotionClass` and `DriveLocomotionClass` set `IsOnBridge` on
+  that height-4 step onto `IsUnderBridge` and clear it when the new cell
+  is not under the deck. Draw uses `Get_Cell_Height` (`cell->Height`
+  plus `BRIDGE_CELL_HEIGHT` while on the deck). TMP `TileType`
   maps to `LandType`; `Can_Enter_Cell` refuses a cell whose
   `Ground[land].Cost[SpeedType]` is 0 unless the step is on a bridge
   deck (`IsUnderBridge` and a height-4 climb or already on spanned
