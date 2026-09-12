@@ -11,10 +11,12 @@ import { ADDON_ANY, ADDON_BASE_GAME, Addon_Enabled } from "./addon";
 import { cc_retrieve } from "./ccfile";
 import type { GameDirectory } from "./files";
 import { INIClass } from "./ini";
-import { dialog_name_id, Fetch_String } from "./language";
-import { pick_from_list } from "./listdlg";
+import { Fetch_String, TXT_EASY, TXT_HARD, TXT_NORMAL } from "./language";
 import type { MenuHost } from "./newmenu";
+import { Options } from "./options";
+import { Run_Owner_Dialog } from "./ownrdlg";
 import { load_title_screen } from "./ownrmenu";
+import { last_presented } from "./present";
 
 export const CAMPAIGN_NONE = -1;
 
@@ -107,28 +109,31 @@ export async function Choose_Campaign(directory: GameDirectory, host: MenuHost):
 	}
 
 	const backdrop =
+		last_presented()?.clone() ??
 		(await load_title_screen(directory, "Title.PCX")) ??
 		(await load_title_screen(directory, "TITLE.PCX"));
 	if (!backdrop) {
-		host.log("Title.PCX missing; cannot show the campaign list.");
+		host.log("No title screen is available for the campaign dialog.");
 		return null;
 	}
 
-	const picked = await pick_from_list(
+	const picked = await Run_Owner_Dialog(
 		host.canvas,
-		backdrop,
-		"Select Campaign:",
+		directory,
+		"IDD_CAMPAIGN",
 		available.map((entry) => ({ id: entry.id, label: entry.campaign.description })),
+		Options.Difficulty,
 		host.cancelled,
-		1,
-		[Fetch_String(dialog_name_id("TXT_EASY")), Fetch_String(dialog_name_id("TXT_NORMAL")), Fetch_String(dialog_name_id("TXT_HARD"))],
+		backdrop,
 	);
 	if (!picked) {
 		return null;
 	}
-	const campaign = Get_Campaign(picked.id);
+	Options.Difficulty = picked.slider;
+	const campaign = Get_Campaign(picked.item);
 	if (campaign) {
-		host.log(`Campaign ${campaign.description}; difficulty ${picked.difficulty}; opens ${campaign.scenario}.`);
+		const difficulty = Fetch_String([TXT_EASY, TXT_NORMAL, TXT_HARD][picked.slider] ?? TXT_NORMAL);
+		host.log(`Campaign ${campaign.description}; difficulty ${difficulty}; opens ${campaign.scenario}.`);
 	}
 	return campaign;
 }

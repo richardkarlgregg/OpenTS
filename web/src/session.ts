@@ -16,6 +16,7 @@ export const GAME_SKIRMISH = 5;
 export const GAME_WDT = 6;
 
 export let SessionType = GAME_NORMAL;
+export let PlayMovies = false;
 
 export function set_session_type(type: number): void {
 	SessionType = type;

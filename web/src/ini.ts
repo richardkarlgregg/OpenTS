@@ -117,12 +117,14 @@ function parse_int_token(value: string): number {
 export class INIClass {
 	private readonly sections = new Map<string, Map<string, string>>();
 
-	load(bytes: Uint8Array): boolean {
-		return this.load_text(decode_ini_bytes(bytes));
+	load(bytes: Uint8Array, merge = false): boolean {
+		return this.load_text(decode_ini_bytes(bytes), merge);
 	}
 
-	load_text(text: string): boolean {
-		this.sections.clear();
+	load_text(text: string, merge = false): boolean {
+		if (!merge) {
+			this.sections.clear();
+		}
 		let current: Map<string, string> | null = null;
 		let current_name = "";
 		let saw_section = false;

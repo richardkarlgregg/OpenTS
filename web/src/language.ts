@@ -16,6 +16,21 @@ export const TXT_READY = 6;
 export const TXT_HOLD = 7;
 export const TXT_OK = 10;
 export const TXT_TAB_BUTTON_CONTROLS = 129;
+export const TXT_EASY = 148;
+export const TXT_NORMAL = 149;
+export const TXT_HARD = 150;
+export const TXT_MEDIUM = 158;
+export const TXT_DIFFICULTY_LEVEL = 1117;
+export const TXT_LOADING_GAME1A = 818;
+export const TXT_LOADING_GAME1C = 819;
+export const TXT_LOADING_GAME1D = 820;
+export const TXT_LOADING_GAME1E = 821;
+export const TXT_LOADING_GAME1F = 822;
+export const TXT_LOADING_GAME1G = 823;
+export const TXT_LOADING_GAME1H = 824;
+export const TXT_LOADING_GAME1B = 848;
+
+export type DialogControlKind = "button" | "list" | "slider" | "static";
 
 export type DialogControl = {
 	caption: string;
@@ -24,6 +39,8 @@ export type DialogControl = {
 	y: number;
 	width: number;
 	height: number;
+	kind: DialogControlKind;
+	align: "left" | "center" | "right";
 };
 
 export type DialogTemplate = {
@@ -71,6 +88,8 @@ export function map_dialog_rect(x: number, y: number, width: number, height: num
 		y: Math.round((y * 13) / 8),
 		width: Math.round((width * 6) / 4),
 		height: Math.round((height * 13) / 8),
+		kind: "button",
+		align: "center",
 	};
 }
 
@@ -165,23 +184,118 @@ function parse_dialogs(text: string, defines: Map<string, number>): DialogTempla
 	return out;
 }
 
+function resolve_control_id(token: string, defines: Map<string, number>): number {
+	if (/^-?\d+$/.test(token)) {
+		return Number.parseInt(token, 10);
+	}
+	return defines.get(token) ?? -1;
+}
+
+function control_kind(class_name: string): DialogControlKind {
+	const lower = class_name.toLowerCase();
+	if (lower === "static") {
+		return "static";
+	}
+	if (lower === "msctls_trackbar32") {
+		return "slider";
+	}
+	if (lower.includes("listbox")) {
+		return "list";
+	}
+	return "button";
+}
+
+function push_control(
+	controls: DialogControl[],
+	caption: string,
+	id: number,
+	x: string,
+	y: string,
+	width: string,
+	height: string,
+	kind: DialogControlKind,
+	align: DialogControl["align"],
+): void {
+	controls.push({
+		caption,
+		id,
+		x: Number.parseInt(x, 10),
+		y: Number.parseInt(y, 10),
+		width: Number.parseInt(width, 10),
+		height: Number.parseInt(height, 10),
+		kind,
+		align,
+	});
+}
+
 function parse_controls(body: string, defines: Map<string, number>): DialogControl[] {
 	const joined = body.replace(/,\s*\r?\n\s*/g, ", ");
 	const controls: DialogControl[] = [];
-	const re =
-		/CONTROL\s+"((?:[^"]|"")*)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*|\d+)\s*,\s*"[^"]*"\s*,\s*[^,]+,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
 	let match: RegExpExecArray | null;
-	while ((match = re.exec(joined)) !== null) {
-		const id_token = match[2]!;
-		const id = /^\d+$/.test(id_token) ? Number.parseInt(id_token, 10) : (defines.get(id_token) ?? -1);
-		controls.push({
-			caption: unescape_rc_string(match[1]!),
-			id,
-			x: Number.parseInt(match[3]!, 10),
-			y: Number.parseInt(match[4]!, 10),
-			width: Number.parseInt(match[5]!, 10),
-			height: Number.parseInt(match[6]!, 10),
-		});
+	const control_re =
+		/CONTROL\s+"((?:[^"]|"")*)"\s*,\s*(-?\d+|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*"([^"]*)"\s*,\s*[^,]+,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+	while ((match = control_re.exec(joined)) !== null) {
+		push_control(
+			controls,
+			unescape_rc_string(match[1]!),
+			resolve_control_id(match[2]!, defines),
+			match[4]!,
+			match[5]!,
+			match[6]!,
+			match[7]!,
+			control_kind(match[3]!),
+			match[3]!.toLowerCase() === "static" ? "left" : "center",
+		);
+	}
+	const ctext_re =
+		/CTEXT\s+"((?:[^"]|"")*)"\s*,\s*(-?\d+|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+	while ((match = ctext_re.exec(joined)) !== null) {
+		push_control(
+			controls,
+			unescape_rc_string(match[1]!),
+			resolve_control_id(match[2]!, defines),
+			match[3]!,
+			match[4]!,
+			match[5]!,
+			match[6]!,
+			"static",
+			"center",
+		);
+	}
+	const rtext_re =
+		/RTEXT\s+"((?:[^"]|"")*)"\s*,\s*(-?\d+|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+	while ((match = rtext_re.exec(joined)) !== null) {
+		push_control(
+			controls,
+			unescape_rc_string(match[1]!),
+			resolve_control_id(match[2]!, defines),
+			match[3]!,
+			match[4]!,
+			match[5]!,
+			match[6]!,
+			"static",
+			"right",
+		);
+	}
+	const ltext_re =
+		/LTEXT\s+"((?:[^"]|"")*)"\s*,\s*(-?\d+|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+	while ((match = ltext_re.exec(joined)) !== null) {
+		push_control(
+			controls,
+			unescape_rc_string(match[1]!),
+			resolve_control_id(match[2]!, defines),
+			match[3]!,
+			match[4]!,
+			match[5]!,
+			match[6]!,
+			"static",
+			"left",
+		);
+	}
+	const list_re =
+		/LISTBOX\s+(-?\d+|[A-Za-z_][A-Za-z0-9_]*)\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*,\s*(\d+)/g;
+	while ((match = list_re.exec(joined)) !== null) {
+		push_control(controls, "", resolve_control_id(match[1]!, defines), match[2]!, match[3]!, match[4]!, match[5]!, "list", "left");
 	}
 	return controls;
 }

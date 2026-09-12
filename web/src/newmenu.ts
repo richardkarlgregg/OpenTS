@@ -19,9 +19,12 @@ import {
 import { cc_available, cc_retrieve } from "./ccfile";
 import { mix_named } from "./mixfile";
 import type { GameDirectory } from "./files";
+import { last_presented } from "./present";
+import { Sound_Options_Dialog } from "./sounddlg";
 import { Do_Graphic_Menu, Presentation, set_item_enabled } from "./grphmenu";
 import { INIClass } from "./ini";
 import { load_title_screen, Main_Menu, SEL_CAMPAIGN_GAME, SEL_EXIT, SEL_INTRO, SEL_LOAD_GAME, SEL_MULTIPLAYER_GAME, SEL_NONE, SEL_OPTIONS, SEL_VERSION, SEL_VIEW_CREDITS, sel_name } from "./ownrmenu";
+import { Play_Intro_Selection, Play_Title_Movie } from "./movies";
 import { GAME_IPX, GAME_NORMAL, GAME_SKIRMISH, set_session_type } from "./session";
 
 export const NSEL_EXIT = 0;
@@ -47,6 +50,14 @@ export type MenuHost = {
 	log: (line: string) => void;
 	cancelled: () => boolean;
 };
+
+async function Show_Sound_Options(host: MenuHost): Promise<void> {
+	const backdrop = last_presented();
+	if (!backdrop) {
+		return;
+	}
+	await Sound_Options_Dialog(host.canvas, backdrop.clone(), host.cancelled);
+}
 
 function nsel_name(id: number): string {
 	switch (id) {
@@ -179,11 +190,11 @@ async function game_select_loop(directory: GameDirectory, ini: INIClass, host: M
 			switch (item) {
 				case GMENU_TIBSUN:
 					game_mode = 0;
-					host.log("Tiberian Sun selected. Title movies are not ported yet.");
+					await Play_Title_Movie(directory, host, false);
 					continue;
 				case GMENU_FIRESTORM:
 					game_mode = 1;
-					host.log("Firestorm selected. Title movies are not ported yet.");
+					await Play_Title_Movie(directory, host, true);
 					continue;
 				case NSEL_EXIT:
 				case NSEL_VERSION:
@@ -244,7 +255,12 @@ export async function New_Main_Menu(directory: GameDirectory, host: MenuHost): P
 			host.log("Title.PCX missing; cannot show the old menu.");
 			return SEL_EXIT;
 		}
-		return Main_Menu(host.canvas, backdrop, host.cancelled);
+		const picked = await Main_Menu(host.canvas, backdrop, host.cancelled);
+		if (picked === SEL_OPTIONS) {
+			await Show_Sound_Options(host);
+			return SEL_NONE;
+		}
+		return picked;
 	}
 
 	host.log(`Menu choice ${nsel_name(selection)}.`);
@@ -259,9 +275,11 @@ export async function New_Main_Menu(directory: GameDirectory, host: MenuHost): P
 	if (mapped === SEL_LOAD_GAME) {
 		host.log("Save/load is not ported yet.");
 	} else if (mapped === SEL_OPTIONS) {
-		host.log("Options dialogs are not ported yet.");
+		await Show_Sound_Options(host);
+		return SEL_NONE;
 	} else if (mapped === SEL_INTRO) {
-		host.log("Intro movies are not ported yet.");
+		await Play_Intro_Selection(directory, host);
+		return SEL_NONE;
 	}
 	if (mapped !== SEL_NONE) {
 		host.log(`Maps to ${sel_name(mapped)}.`);

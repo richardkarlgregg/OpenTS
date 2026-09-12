@@ -26,11 +26,55 @@ export const MPH_LIGHT_SPEED = 255;
 export const BRIDGE_CELL_HEIGHT = 4;
 export const RAMP_NONE = 0;
 
+export const LAND_CLEAR = 0;
+export const LAND_ROAD = 1;
+export const LAND_WATER = 2;
+export const LAND_ROCK = 3;
+export const LAND_WALL = 4;
+export const LAND_TIBERIUM = 5;
+export const LAND_BEACH = 6;
+export const LAND_ROUGH = 7;
+export const LAND_ICE = 8;
+export const LAND_RAILROAD = 9;
+export const LAND_TUNNEL = 10;
+export const LAND_WEEDS = 11;
+export const LAND_COUNT = 12;
+
+export const SPEED_FOOT = 0;
+export const SPEED_TRACK = 1;
+export const SPEED_WHEEL = 2;
+export const SPEED_HOVER = 3;
+export const SPEED_WINGED = 4;
+export const SPEED_FLOAT = 5;
+export const SPEED_AMPHIBIOUS = 6;
+export const SPEED_CREEP = 7;
+export const SPEED_COUNT = 8;
+
+export const LAND_NAMES = [
+	"Clear",
+	"Road",
+	"Water",
+	"Rock",
+	"Wall",
+	"Tiberium",
+	"Beach",
+	"Rough",
+	"Ice",
+	"Railroad",
+	"Tunnel",
+	"Weeds",
+] as const;
+
+export const SPEED_NAMES = ["Foot", "Track", "Wheel", "Hover", "Winged", "Float", "Amphibious", "Creep"] as const;
+
 export type { PathEnter };
 
 export type CellTerrain = {
 	height: number;
 	ramp: number;
+	land: number;
+	tile: number;
+	subtile: number;
 };
 
 export const ADJACENT_CELL: readonly [number, number][] = [
@@ -52,6 +96,7 @@ export type FootState = {
 	path: number[];
 	moving: boolean;
 	stage: number;
+	walked: number;
 	timer: number;
 	max_speed: number;
 	height_agl: number;
@@ -71,8 +116,12 @@ export type FootState = {
 	rotation_timer: number;
 	is_taking_off: boolean;
 	is_landing: boolean;
+	commenced_landing: boolean;
 	flight_level: number;
 	left_map: boolean;
+	is_drop_pod: boolean;
+	drop_pod_dir: number;
+	drop_pod_dest: Point2D | null;
 };
 
 export type ClaimHead = (cell: Point2D) => Point2D | null;
@@ -131,6 +180,7 @@ export function Make_Foot(cell: Point2D, max_speed: number, rot = 0): FootState 
 		path: [],
 		moving: false,
 		stage: 0,
+		walked: 0,
 		timer: WALK_RATE,
 		max_speed: Math.max(1, max_speed),
 		height_agl: 0,
@@ -150,8 +200,12 @@ export function Make_Foot(cell: Point2D, max_speed: number, rot = 0): FootState 
 		rotation_timer: 0,
 		is_taking_off: false,
 		is_landing: false,
+		commenced_landing: false,
 		flight_level: 0,
 		left_map: false,
+		is_drop_pod: false,
+		drop_pod_dir: 0,
+		drop_pod_dest: null,
 	};
 }
 
@@ -171,7 +225,7 @@ export function Apply_Coord(foot: FootState): { x: number; y: number; ox: number
 }
 
 export function terrain_of(terrain: Map<string, CellTerrain>, cell: Point2D): CellTerrain {
-	return terrain.get(`${cell.x},${cell.y}`) ?? { height: 0, ramp: RAMP_NONE };
+	return terrain.get(`${cell.x},${cell.y}`) ?? { height: 0, ramp: RAMP_NONE, land: LAND_CLEAR, tile: 0, subtile: 0 };
 }
 
 export function Can_Reach(
@@ -196,7 +250,13 @@ export function Can_Reach(
 			if (graph) {
 				const from_cell = graph_cell(graph, from);
 				const to_cell = graph_cell(graph, to);
-				if (from_cell?.under_bridge || to_cell?.under_bridge) {
+				if (from_cell?.under_bridge && to_cell?.under_bridge && to_cell.bridge_traversable) {
+					return true;
+				}
+				if (!from_cell?.under_bridge && to_cell?.under_bridge && to_cell.bridge_traversable) {
+					return true;
+				}
+				if (from_cell?.under_bridge && from_cell.bridge_traversable && !to_cell?.under_bridge) {
 					return true;
 				}
 			}

@@ -9,18 +9,21 @@
 
 import { cc_retrieve } from "./ccfile";
 import type { GameDirectory } from "./files";
-import { INIClass, type Rect } from "./ini";
-import { load_theater_previews, preview_cell_colors, type TilePreviewColors } from "./isotile";
+import { INIClass, type Point2D, type Rect } from "./ini";
+import { preview_cell_colors, type TilePreviewColors } from "./isotile";
 import { lzo_straw_decompress } from "./lzo";
+import { Choose_Side, Movie_Filename, Play_Movie_VQ, VQ_From_Name } from "./movies";
 import { load_map_artwork } from "./objects";
 import { read_pcx } from "./pcx";
-import { canvas_mouse, present } from "./present";
+import { present } from "./present";
+import { Progress } from "./progress";
 import { build_hicolor_pixel, DSurface } from "./surface";
 import { Show_Tactical } from "./tactical";
+import { THEME_NONE, THEME_PICK_ANOTHER, Theme } from "./theme";
 
 const LOAD400 = ["LOAD400C.PCX", "LOAD400D.PCX", "LOAD400A.PCX", "LOAD400B.PCX"];
 
-export function Pick_Load_Background_Name(cd: number, scenario: string): string {
+export function Pick_Load_Background_Name(cd: number, scenario: string, pos?: Point2D): string {
 	let player = cd;
 	if (player > 1) {
 		player = scenario.toUpperCase().includes("GDI") ? 0 : 1;
@@ -29,10 +32,14 @@ export function Pick_Load_Background_Name(cd: number, scenario: string): string 
 		player = 0;
 	}
 	const choice = (player << 1) + (Math.random() < 0.5 ? 1 : 0);
+	if (pos) {
+		pos.x = 440 - 4;
+		pos.y = 158 + (player === 1 ? 10 : 3);
+	}
 	return LOAD400[choice]!;
 }
 
-function read_preview(ini: INIClass): { surface: DSurface; bytes: number } | null {
+export function read_preview(ini: INIClass): { surface: DSurface; bytes: number } | null {
 	const packed = ini.get_uublock("PreviewPack");
 	if (packed.length === 0) {
 		return null;
@@ -109,7 +116,7 @@ export function In_Radar(x: number, y: number, play: Rect): boolean {
 	return x + y > w && x - y < w && y - x < w && x + y <= w + 2 * h;
 }
 
-function draw_iso_preview(
+export function draw_iso_preview(
 	cells: IsoCell[],
 	play: Rect,
 	table: TilePreviewColors[][],
@@ -197,91 +204,132 @@ export async function Show_Scenario(
 	log: (line: string) => void,
 	cancelled: () => boolean,
 	backdrop_name?: string,
+	text_pos?: Point2D,
+	start?: { briefing?: boolean; cd?: number },
 ): Promise<void> {
-	const ini = await load_scenario_ini(directory, filename);
-	if (!ini) {
-		log(`Could not open scenario ${filename}.`);
-		return;
-	}
-
-	const name = ini.get_string("Basic", "Name", filename);
-	const theater = ini.get_string("Map", "Theater", "");
-	const size = ini.get_rect("Map", "Size", { x: 0, y: 0, width: 0, height: 0 });
-	const local = ini.get_rect("Map", "LocalSize", { x: 0, y: 0, width: 0, height: 0 });
-	const level = ini.get_int("Map", "Level", 0);
-	log(`Scenario ${filename}: "${name}" theater ${theater || "?"} size ${size.width}x${size.height}.`);
-
-	const preview = read_preview(ini);
-	const iso = read_isomap_cells(ini);
-	log(
-		preview
-			? `PreviewPack ${preview.surface.width}x${preview.surface.height} (${preview.bytes} bytes).`
-			: "No PreviewPack; building IsoMapPack5 radar.",
-	);
-	let iso_surface: DSurface | null = null;
-	if (iso) {
-		const table = await load_theater_previews(directory, theater);
-		iso_surface = draw_iso_preview(iso.cells, size, table, level, local.y);
-		log(
-			`IsoMapPack5 ${iso.cells.length} cells, radar ${iso_surface ? `${iso_surface.width}x${iso_surface.height}` : "none"} (${iso.bytes} bytes).`,
-		);
-	}
-
+	const pos = text_pos ?? { x: 436, y: 161 };
+	let abort = cancelled();
+	const on_key = (event: KeyboardEvent): void => {
+		if (event.key === "Escape") {
+			abort = true;
+		}
+	};
+	window.addEventListener("keydown", on_key);
 	let frame = new DSurface(640, 400);
-	if (backdrop_name) {
-		const packed = await cc_retrieve(directory, backdrop_name);
-		if (packed) {
-			const pcx = read_pcx(packed);
-			if (pcx) {
-				if (pcx.width === 640 && pcx.height === 400) {
-					frame = pcx;
-				} else {
-					blit_fit(frame, pcx, 0, 0, 640, 400);
+	const briefing = start?.briefing !== false;
+	const host = { canvas, cancelled: () => abort || cancelled() };
+	const stopped = (): boolean => abort || cancelled();
+	try {
+		if (briefing && start?.cd !== undefined && start.cd < 2) {
+			await Choose_Side(directory, host, start.cd);
+			if (stopped()) {
+				return;
+			}
+		}
+		if (backdrop_name) {
+			const packed = await cc_retrieve(directory, backdrop_name);
+			if (packed) {
+				const pcx = read_pcx(packed);
+				if (pcx) {
+					if (pcx.width === 640 && pcx.height === 400) {
+						frame = pcx;
+					} else {
+						blit_fit(frame, pcx, 0, 0, 640, 400);
+					}
 				}
 			}
 		}
+		Progress.Initialize(100);
+		Progress.Set_Graphic_Data(pos);
+		Progress.Display_Progress();
+		const paint = async (): Promise<void> => {
+			present(canvas, frame, Progress.Labels());
+			await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+		};
+		const step = async (percent: number): Promise<void> => {
+			if (stopped()) {
+				return;
+			}
+			Progress.Set_Progress_Percent(percent);
+			await paint();
+		};
+		await paint();
+		if (stopped()) {
+			return;
+		}
+
+		const ini = await load_scenario_ini(directory, filename);
+		if (!ini) {
+			log(`Could not open scenario ${filename}.`);
+			return;
+		}
+		await step(12);
+
+		const name = ini.get_string("Basic", "Name", filename);
+		const theater = ini.get_string("Map", "Theater", "");
+		const size = ini.get_rect("Map", "Size", { x: 0, y: 0, width: 0, height: 0 });
+		const local = ini.get_rect("Map", "LocalSize", { x: 0, y: 0, width: 0, height: 0 });
+		const level = ini.get_int("Map", "Level", 0);
+		log(`Scenario ${filename}: "${name}" theater ${theater || "?"} size ${size.width}x${size.height}.`);
+		if (briefing) {
+			await Play_Movie_VQ(directory, host, VQ_From_Name(ini.get_string("Basic", "Intro")));
+			if (stopped()) {
+				return;
+			}
+			await Play_Movie_VQ(directory, host, VQ_From_Name(ini.get_string("Basic", "Brief")));
+			if (stopped()) {
+				return;
+			}
+		}
+		await step(20);
+
+		const iso = read_isomap_cells(ini);
+		if (iso) {
+			log(`IsoMapPack5 ${iso.cells.length} cells (${iso.bytes} bytes).`);
+		} else {
+			log("No IsoMapPack5.");
+		}
+		await step(30);
+		if (stopped()) {
+			return;
+		}
+
+		const artwork = await load_map_artwork(directory, ini, theater, log, step);
+		artwork.win_movie = Movie_Filename(VQ_From_Name(ini.get_string("Basic", "Win")));
+		artwork.lose_movie = Movie_Filename(VQ_From_Name(ini.get_string("Basic", "Lose")));
+		await step(100);
+		if (stopped() || !iso) {
+			return;
+		}
+		if (briefing) {
+			await Play_Movie_VQ(directory, host, VQ_From_Name(ini.get_string("Basic", "Action")), Theme.From_Name(ini.get_string("Basic", "Theme", "")));
+			if (stopped()) {
+				return;
+			}
+		}
+		const transit = Theme.From_Name(ini.get_string("Basic", "Theme", ""));
+		if (Theme.What_Is_Playing() === THEME_NONE) {
+			Theme.Queue_Song(transit !== THEME_NONE ? transit : THEME_PICK_ANOTHER);
+		}
+
+		await Show_Tactical(
+			canvas,
+			directory,
+			theater,
+			iso.cells,
+			size,
+			local,
+			level,
+			read_home_cell(ini),
+			name,
+			log,
+			cancelled,
+			artwork,
+		);
+	} finally {
+		window.removeEventListener("keydown", on_key);
+		Progress.End();
 	}
-
-	const picture = preview?.surface ?? iso_surface;
-	if (picture) {
-		const well = backdrop_name
-			? { x: 16, y: 28, width: 420, height: 320 }
-			: { x: 0, y: 0, width: 640, height: 400 };
-		const max_w = backdrop_name ? well.width : 360;
-		const max_h = backdrop_name ? well.height : 280;
-		const scale = Math.min(max_w / picture.width, max_h / picture.height);
-		const w = Math.max(1, Math.floor(picture.width * scale));
-		const h = Math.max(1, Math.floor(picture.height * scale));
-		const x = well.x + Math.floor((well.width - w) / 2);
-		const y = well.y + Math.floor((well.height - h) / 2);
-		blit_fit(frame, picture, x, y, w, h);
-	}
-
-	present(canvas, frame, [
-		{ x: 8, y: 8, width: 624, height: 18, text: name, selected: true },
-		{ x: 8, y: 374, width: 624, height: 18, text: iso ? "Click to enter the map; Escape returns to the menu" : "Click or Escape to return to the menu" },
-	]);
-
-	const next = await wait_dismiss(canvas, cancelled);
-	if (next !== "map" || !iso) {
-		return;
-	}
-
-	const artwork = await load_map_artwork(directory, ini, theater, log);
-	await Show_Tactical(
-		canvas,
-		directory,
-		theater,
-		iso.cells,
-		size,
-		local,
-		level,
-		read_home_cell(ini),
-		name,
-		log,
-		cancelled,
-		artwork,
-	);
 }
 
 function read_home_cell(ini: INIClass): { x: number; y: number } | null {
@@ -294,28 +342,3 @@ function read_home_cell(ini: INIClass): { x: number; y: number } | null {
 	return null;
 }
 
-function wait_dismiss(canvas: HTMLCanvasElement, cancelled: () => boolean): Promise<"map" | "menu"> {
-	return new Promise((resolve) => {
-		const finish = (next: "map" | "menu"): void => {
-			canvas.removeEventListener("click", on_click);
-			window.removeEventListener("keydown", on_key);
-			resolve(next);
-		};
-		const on_click = (event: MouseEvent): void => {
-			canvas_mouse(canvas, event);
-			finish("map");
-		};
-		const on_key = (event: KeyboardEvent): void => {
-			if (cancelled() || event.key === "Escape") {
-				finish("menu");
-			} else if (event.key === "Enter") {
-				finish("map");
-			}
-		};
-		canvas.addEventListener("click", on_click);
-		window.addEventListener("keydown", on_key);
-		if (cancelled()) {
-			finish("menu");
-		}
-	});
-}

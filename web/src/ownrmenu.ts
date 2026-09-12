@@ -13,6 +13,8 @@ import { dialog_name_id, Fetch_Dialog, map_dialog_rect } from "./language";
 import { read_pcx } from "./pcx";
 import { canvas_mouse, present, type CanvasLabel } from "./present";
 import { build_hicolor_pixel, DSurface } from "./surface";
+import { Theme } from "./theme";
+import { Menu_Click_Sound } from "./voc";
 
 export const SEL_TIMEOUT = -1;
 export const SEL_NEW_SCENARIO = 0;
@@ -126,6 +128,8 @@ export function Main_Menu(
 	return new Promise((resolve) => {
 		let selected: MenuButton | null = null;
 		let done = false;
+		Theme.Play_Song(Theme.From_Name("Intro"));
+		const tick = window.setInterval(() => Theme.AI(), 250);
 
 		const paint = (): void => {
 			present(canvas, compose(backdrop, buttons, selected), labels_from(buttons, selected));
@@ -137,6 +141,7 @@ export function Main_Menu(
 				return;
 			}
 			done = true;
+			window.clearInterval(tick);
 			canvas.removeEventListener("mousemove", on_move);
 			canvas.removeEventListener("click", on_click);
 			window.removeEventListener("keydown", on_key);
@@ -173,6 +178,7 @@ export function Main_Menu(
 			}
 			const button = hit(event);
 			if (button && button.enabled && button.sel !== SEL_NONE) {
+				Menu_Click_Sound();
 				finish(button.sel);
 			}
 		};

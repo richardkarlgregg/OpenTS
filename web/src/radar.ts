@@ -90,6 +90,15 @@ function cell_to_local(radar: RadarMap, x: number, y: number): Point2D {
 	};
 }
 
+function local_to_cell(radar: RadarMap, lx: number, ly: number): Point2D {
+	const px = lx / radar.scale_x + radar.min_x;
+	const py = (ly / radar.scale_y + radar.min_y) * 2;
+	return {
+		x: Math.round((px + py) / 2),
+		y: Math.round((py - px) / 2),
+	};
+}
+
 export function Radar_Pixel_To_Cell(radar: RadarMap, screen: Point2D): Point2D | null {
 	const lx = screen.x - radar.blit_x;
 	const ly = screen.y - radar.blit_y;
@@ -132,14 +141,23 @@ export function Render_Radar(
 	sprites: MapSprite[],
 	camera: Point2D,
 ): void {
-	const scratch = new DSurface(radar.blit_w, radar.blit_h);
+	const lookup = new Map<string, { x: number; y: number; height: number; tile: number; subtile: number }>();
 	for (const cell of cells) {
-		if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
-			continue;
+		lookup.set(`${cell.x},${cell.y}`, cell);
+	}
+	const scratch = new DSurface(radar.blit_w, radar.blit_h);
+	for (let ly = 0; ly < radar.blit_h; ly++) {
+		for (let lx = 0; lx < radar.blit_w; lx++) {
+			const at = local_to_cell(radar, lx, ly);
+			const cell = lookup.get(`${at.x},${at.y}`);
+			if (!cell) {
+				continue;
+			}
+			if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
+				continue;
+			}
+			scratch.put_pixel(lx, ly, tile_color(tiles, cell, (lx & 1) === 1));
 		}
-		const local = cell_to_local(radar, cell.x, cell.y);
-		scratch.put_pixel(local.x, local.y, tile_color(tiles, cell, false));
-		scratch.put_pixel(local.x + 1, local.y, tile_color(tiles, cell, true));
 	}
 	for (const sprite of sprites) {
 		if (!sprite.selectable) {

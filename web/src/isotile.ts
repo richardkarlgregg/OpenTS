@@ -34,12 +34,17 @@ export type IsoSubtile = {
 	indices: Uint8Array;
 	extra: IsoExtraImage | null;
 	ramp: number;
+	tile_type: number;
 };
 
 export type TheaterTiles = {
 	palette: Uint16Array;
 	sets: IsoSubtile[][];
+	bridge_set: number;
+	train_bridge_set: number;
 };
+
+export const BRIDGE_SET_COUNT = 16;
 
 export const ISO_TILE_PIXEL_W = 48;
 export const ISO_TILE_PIXEL_H = 24;
@@ -79,7 +84,7 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	for (let i = 0; i < count; i++) {
 		const offset = view.getInt32(16 + i * 4, true);
 		if (offset <= 0 || offset + RECORD_HIGH + 2 >= bytes.length) {
-			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0 });
+			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0, tile_type: 0 });
 			continue;
 		}
 		const colors: TilePreviewColors = {
@@ -114,7 +119,8 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 			}
 		}
 		const ramp = bytes[offset + 42] ?? 0;
-		tiles.push({ colors, indices, extra, ramp });
+		const tile_type = bytes[offset + 41] ?? 0;
+		tiles.push({ colors, indices, extra, ramp, tile_type });
 	}
 	return tiles;
 }
@@ -155,22 +161,33 @@ export async function load_theater_tiles(directory: GameDirectory, theater_name:
 	const sets: IsoSubtile[][] = [];
 	const ini_bytes = await cc_retrieve(directory, `${seed.root}.INI`);
 	if (!ini_bytes) {
-		const empty = { palette, sets };
+		const empty = { palette, sets, bridge_set: -1, train_bridge_set: -1 };
 		cache.set(seed.name, empty);
 		return empty;
 	}
 	const ini = new INIClass();
 	if (!ini.load(ini_bytes)) {
-		const empty = { palette, sets };
+		const empty = { palette, sets, bridge_set: -1, train_bridge_set: -1 };
 		cache.set(seed.name, empty);
 		return empty;
 	}
 
+	const role_bridge = ini.get_int("General", "BridgeSet", -1);
+	const role_train = ini.get_int("General", "TrainBridgeSet", -1);
+	let bridge_set = -1;
+	let train_bridge_set = -1;
 	for (let setid = 0; ; setid++) {
 		const section = `TileSet${setid.toString().padStart(4, "0")}`;
 		const tiles_in_set = ini.get_int(section, "TilesInSet", -1);
 		if (tiles_in_set < 0) {
 			break;
+		}
+		const heapid = sets.length;
+		if (setid === role_bridge) {
+			bridge_set = heapid;
+		}
+		if (setid === role_train) {
+			train_bridge_set = heapid;
 		}
 		const file_name = ini.get_string(section, "FileName", "TILE");
 		for (let i = 0; i < tiles_in_set; i++) {
@@ -183,7 +200,7 @@ export async function load_theater_tiles(directory: GameDirectory, theater_name:
 		}
 	}
 
-	const tiles = { palette, sets };
+	const tiles = { palette, sets, bridge_set, train_bridge_set };
 	cache.set(seed.name, tiles);
 	return tiles;
 }
@@ -264,4 +281,14 @@ export function blit_iso_tile(dest: DSurface, dx: number, dy: number, tile: IsoS
 			dest.pixels[y * dest.width + x] = palette[index]!;
 		}
 	}
+}
+
+const TILE_LAND = [0, 8, 8, 8, 8, 10, 9, 3, 3, 2, 6, 1, 1, 0, 7, 3];
+
+export function land_from_tile_type(tile_type: number): number {
+	const signed = (tile_type << 24) >> 24;
+	if (signed < 0 || signed >= TILE_LAND.length) {
+		return 0;
+	}
+	return TILE_LAND[signed] ?? 0;
 }

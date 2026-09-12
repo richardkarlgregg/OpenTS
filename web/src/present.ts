@@ -17,9 +17,19 @@ export type CanvasLabel = {
 	text: string;
 	enabled?: boolean;
 	selected?: boolean;
+	align?: "center" | "left" | "right";
+	color?: string;
+	font?: string;
 };
 
+let last_surface: DSurface | null = null;
+
+export function last_presented(): DSurface | null {
+	return last_surface;
+}
+
 export function present(canvas: HTMLCanvasElement, surface: DSurface, labels?: CanvasLabel[]): void {
+	last_surface = surface;
 	if (canvas.width !== surface.width || canvas.height !== surface.height) {
 		canvas.width = surface.width;
 		canvas.height = surface.height;
@@ -42,18 +52,37 @@ export function present(canvas: HTMLCanvasElement, surface: DSurface, labels?: C
 	if (!labels || labels.length === 0) {
 		return;
 	}
-	ctx.font = '12px "MS Sans Serif", "Segoe UI", sans-serif';
-	ctx.textAlign = "center";
-	ctx.textBaseline = "middle";
 	for (const label of labels) {
 		if (label.enabled === false) {
 			ctx.fillStyle = "#7a7a7a";
+		} else if (label.color) {
+			ctx.fillStyle = label.color;
 		} else if (label.selected) {
 			ctx.fillStyle = "#ffe082";
 		} else {
 			ctx.fillStyle = "#f0c040";
 		}
-		ctx.fillText(label.text, label.x + label.width / 2, label.y + label.height / 2, label.width - 8);
+		if (label.font) {
+			ctx.font = label.font;
+		} else if (label.align === "left" || label.align === "right") {
+			ctx.font = '8px "Small Fonts", Tahoma, "MS Sans Serif", sans-serif';
+		} else {
+			ctx.font = '12px "MS Sans Serif", "Segoe UI", sans-serif';
+		}
+		if (label.align === "left") {
+			ctx.textAlign = "left";
+			ctx.textBaseline = label.font ? "middle" : "top";
+			const y = label.font ? label.y + label.height / 2 : label.y;
+			ctx.fillText(label.text, label.x + 2, y, label.width - 4);
+		} else if (label.align === "right") {
+			ctx.textAlign = "right";
+			ctx.textBaseline = "middle";
+			ctx.fillText(label.text, label.x + label.width, label.y + label.height / 2, label.width);
+		} else {
+			ctx.textAlign = "center";
+			ctx.textBaseline = "middle";
+			ctx.fillText(label.text, label.x + label.width / 2, label.y + label.height / 2, label.width - 8);
+		}
 	}
 }
 

@@ -307,6 +307,12 @@ function start_of_move(
 		}
 		foot.path = Find_Path(here, foot.dest, can_path, 200, graph, avoid);
 		facing = foot.path[0] ?? FACING_NONE;
+		if (foot.path.length === 0) {
+			foot.dest = null;
+			foot.moving = false;
+			stop_driver(foot);
+			return false;
+		}
 		if (facing === FACING_NONE || facing === undefined || facing === TUNNEL) {
 			return false;
 		}

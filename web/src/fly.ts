@@ -76,6 +76,7 @@ function take_off(foot: FootState, cruise: number): void {
 function land(foot: FootState): void {
 	foot.is_taking_off = false;
 	foot.is_landing = true;
+	foot.commenced_landing = false;
 	foot.flight_level = 0;
 }
 

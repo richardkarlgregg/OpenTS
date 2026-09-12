@@ -9,6 +9,7 @@
 
 import { canvas_mouse, present, type CanvasLabel } from "./present";
 import { build_hicolor_pixel, DSurface } from "./surface";
+import { Menu_Click_Sound } from "./voc";
 
 export type ListItem = {
 	id: number;
@@ -177,9 +178,11 @@ export function pick_from_list(
 			}
 			if (hit.kind === "ok") {
 				const item = items[selected];
+				Menu_Click_Sound();
 				finish(item ? { id: item.id, difficulty: diff } : null);
 				return;
 			}
+			Menu_Click_Sound();
 			finish(null);
 		};
 
@@ -193,6 +196,7 @@ export function pick_from_list(
 			}
 			if (event.key === "Enter") {
 				const item = items[selected];
+				Menu_Click_Sound();
 				finish(item ? { id: item.id, difficulty: diff } : null);
 			}
 			if (event.key === "ArrowDown") {

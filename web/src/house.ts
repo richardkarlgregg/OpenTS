@@ -170,6 +170,7 @@ export class HouseClass {
 	JustBuiltInfantry = -1;
 	JustBuiltUnit = -1;
 	JustBuiltAircraft = -1;
+	IsAllToHunt = false;
 
 	constructor(type: HouseTypeClass) {
 		this.Class = type;

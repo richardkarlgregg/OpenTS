@@ -12,13 +12,15 @@ import { Choose_Campaign } from "./campaign";
 import { directory_from_file_list, type GameDirectory } from "./files";
 import { Fetch_String, language_stats, TXT_COPYRIGHT, TXT_OK } from "./language";
 import { clear_mix_list, register_mix, register_nested_mixes } from "./mixfile";
+import { Play_Intro_Selection, Play_Startup_Movies, Register_Movies } from "./movies";
 import { New_Main_Menu } from "./newmenu";
-import { SEL_CAMPAIGN_GAME, SEL_EXIT, SEL_MULTIPLAYER_GAME } from "./ownrmenu";
+import { SEL_CAMPAIGN_GAME, SEL_EXIT, SEL_INTRO, SEL_MULTIPLAYER_GAME } from "./ownrmenu";
 import { present } from "./present";
 import { Pick_Load_Background_Name, Show_Scenario } from "./scenario";
 import { GAME_SKIRMISH, SessionType } from "./session";
 import { Choose_Skirmish_Map } from "./skirmish";
 import { build_hicolor_pixel, DSurface } from "./surface";
+import { Init_Game_Audio } from "./voc";
 
 const log_el = document.querySelector("#log") as HTMLPreElement;
 const canvas = document.querySelector("#frame") as HTMLCanvasElement;
@@ -99,6 +101,11 @@ async function load_install(directory: GameDirectory): Promise<void> {
 
 		Detect_Addons(directory);
 		log(Addon_Installed(ADDON_FIRESTORM) ? "Firestorm rules found." : "Base game only.");
+		const audio = await Init_Game_Audio(directory);
+		log(`SOUND.INI ${audio.vocs} sounds, THEME.INI ${audio.themes} scores.`);
+		log(audio.eva ? "EVA 00-I026.AUD found." : "EVA 00-I026.AUD missing; speech.mix was not mounted.");
+		await Register_Movies(directory);
+		await Play_Startup_Movies(directory, host);
 
 		while (!cancelled()) {
 			const selection = await New_Main_Menu(directory, host);
@@ -109,12 +116,21 @@ async function load_install(directory: GameDirectory): Promise<void> {
 				break;
 			}
 
+			if (selection === SEL_INTRO) {
+				await Play_Intro_Selection(directory, host);
+				continue;
+			}
+
 			if (selection === SEL_CAMPAIGN_GAME) {
 				const campaign = await Choose_Campaign(directory, host);
 				if (campaign && campaign.scenario.length > 0) {
-					const backdrop = Pick_Load_Background_Name(campaign.cd, campaign.scenario);
+					const pos = { x: 0, y: 0 };
+					const backdrop = Pick_Load_Background_Name(campaign.cd, campaign.scenario, pos);
 					log(`Loading screen ${backdrop} (campaign CD ${campaign.cd}).`);
-					await Show_Scenario(canvas, directory, campaign.scenario, log, cancelled, backdrop);
+					await Show_Scenario(canvas, directory, campaign.scenario, log, cancelled, backdrop, pos, {
+						briefing: true,
+						cd: campaign.cd,
+					});
 				}
 				continue;
 			}
@@ -122,8 +138,12 @@ async function load_install(directory: GameDirectory): Promise<void> {
 			if (selection === SEL_MULTIPLAYER_GAME && SessionType === GAME_SKIRMISH) {
 				const mission = await Choose_Skirmish_Map(directory, host);
 				if (mission) {
-					log(`Skirmish map ${mission.filename}.`);
-					await Show_Scenario(canvas, directory, mission.filename, log, cancelled);
+					const pos = { x: 0, y: 0 };
+					const backdrop = Pick_Load_Background_Name(0, mission.filename, pos);
+					log(`Loading screen ${backdrop}; skirmish map ${mission.filename}.`);
+					await Show_Scenario(canvas, directory, mission.filename, log, cancelled, backdrop, pos, {
+						briefing: false,
+					});
 				}
 			}
 		}

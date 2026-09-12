@@ -21,15 +21,17 @@ game.
   and WebGL wait until single-player works.
 - After MIX files are indexed the page runs the graphical menu from
   `NewMenu.INI` when `GMENU.MIX` is present, otherwise the old
-  `IDD_MAIN_MENU` dialog from `language.rc`. New Campaign lists
-  `BATTLE.INI` / `BATTLEFS.INI` and draws that scenario's `PreviewPack`.
-  If the pack is missing it builds the same isometric radar `Create_Preview`
-  would, from the `Size` `In_Radar` diamond, filling missing `IsoMapPack5`
-  cells as clear. The unused north pad (`LocalSize.Y`) is omitted so that
-  strip is not drawn. The campaign
-  loading picture comes from `Pick_Load_Background_Name`: CD 0 is GDI
-  (`LOAD400C`/`LOAD400D`), CD 1 is Nod (`LOAD400A`/`LOAD400B`).   Clicking the
-  load screen opens a pannable isometric tile view from theater TMP files
+  `IDD_MAIN_MENU` dialog from `language.rc`. New Campaign runs
+  `IDD_CAMPAIGN` over the title screen: the `BATTLE.INI` /
+  `BATTLEFS.INI` list, the difficulty slider (`TXT_EASY` /
+  `TXT_NORMAL` / `TXT_HARD`), and owner-draw OK/Cancel. PreviewPack is
+  used when picking a skirmish or network map, not on this dialog.
+  Campaign and skirmish loading uses
+  `Pick_Load_Background_Name` (`LOAD400C`/`LOAD400D` for CD 0 / GDI,
+  `LOAD400A`/`LOAD400B` for CD 1 / Nod) and `ProgressScreenClass` lines
+  `TXT_LOADING_GAME1A`–`1H` at that text well. Load finishes into a
+  pannable isometric tile
+  view from theater TMP files
   (`ISO<Suffix>.PAL` and `Draw_Tile`), with overlay, terrain, building,
   infantry, unit, and aircraft SHPs from `OverlayPack` / the scenario INI.
   Nested theater mixes
@@ -39,35 +41,72 @@ game.
   trees, bridges) uses `ISO<Suffix>.PAL`; tiberium uses the unit palette with
   the `[Colors]` scheme named by that tiberium's `Color=` (Riparius is green).
   Walls use the unit palette and neighbour connection frames. Building
-  `ActiveAnim` overlays, `BibShape`, and `PowersUpBuilding` add-ons (matched
-  onto the parent foundation, not only the origin cell) are drawn at the ART
-  pixel offsets. Shape shadows are the second half of each SHP, blitted with
+  `ActiveAnim` overlays, `BibShape`, and `PowersUpBuilding` add-ons are drawn
+  at the ART pixel offsets. Campaign structure rows carry `UpgradeLevel` and
+  the upgrade type names (`BuildingClass::Read_INI`); those attach the upgrade
+  `Image=` SHP to the parent (component-tower guns are `GACTWR_B`/`C`/`D`).
+  A separate upgrade row still matches onto the parent foundation, not only
+  the origin cell. Shape shadows are the second half of each SHP, blitted with
   `SHAPE_DARKEN`. Map lighting comes from the scenario `[Lighting]` section
   (ambient, RGB tint, height `Level`/`Ground`) plus `LightIntensity` sources
   on buildings, including `InvisibleInGame` lamp posts. Those posts and wall
-  buildings that convert to overlay are not drawn. Infantry use the ART
-  `Sequence` Ready frames and `HumanShape` facing; SHP vehicles use
-  `Shape_Facing_Index` stand frames. House `Color=` remaps techno objects.
+  buildings that convert to overlay are not drawn. `HasSpotlight=yes`
+  buildings (`BuildingClass::Unlimbo`) attach `BuildingLightClass`: RULES
+  `[General]` `SpotlightMovementRadius` / `LocationRadius` / `Speed` /
+  `Acceleration` / `Angle` / `Radius` drive the sweep, a temporary
+  `SpotLightClass` radius-80 extra ramp brightens the ground, and
+  `Draw_Depth_Glow_Line` draws the two beam edges (`75 - 6 * Sweep_Stage`,
+  caster `Z+430`). Infantry use the ART
+  `Sequence` Ready, Walk, FireUp, and Die frames with `HumanShape` facing;
+  SHP vehicles use `Shape_Facing_Index` stand frames, walk frames while
+  moving (`StartWalkFrame` + facing × `WalkFrames` + `TotalFramesWalked` %
+  `WalkFrames`, advanced every `WalkRate` frames), and firing and death
+  frames. House `Color=` remaps techno objects.
   Campaign `HouseClass::Read_All` builds live houses from RULES type order
   (Neutral/Special when the map lists them); `Is_Ally` is the house bitmask;
-  techno rows with no live house are skipped. `TechnoClass::AI` fires
-  `Primary=` through `Can_Fire` / `Fire_At`: `Inviso` warheads apply
+  techno rows with no live house are skipped. Buildings fire
+  `BuildingClass::Get_Class_Weapon_Data`: the first attached upgrade
+  `Primary=` with a loaded weapon (component-tower guns), then the parent
+  type. `TechnoClass::AI` fires that through `Can_Fire` / `Fire_At`: `Inviso` warheads apply
   `Take_Damage` / `Modify_Damage` at once, other projectiles travel at
-  `Speed=` then explode. Guard auto-acquires in `ThreatRange`; a player
-  `ACTION_ATTACK` (`MOUSE_CAN_ATTACK` / `MOUSE_STAY_ATTACK`) chases out of
-  range. Homing, arcing gravity, particles, lasers, and explosion SHPs are
-  not ported. `[Triggers]` / `[Tags]` / `[CellTags]` load after houses; live-owner
+  `Speed=` then explode with the warhead `AnimList` SHP (`Combat_Anim`).
+  A `Turret=yes` building (or an upgrade that brings one) aims
+  `PrimaryFacing` with `ROT=` and holds `FIRE_FACING` until
+  `Is_Complete_Turn` (`DIR_STEP_32`). The turret SHP stage is
+  `TechnoClass::BodyShape[As_Dir32()]`, not `Shape_Facing_Index`.
+  Guard auto-acquires in `ThreatRange`; a player `ACTION_ATTACK`
+  (`MOUSE_CAN_ATTACK` / `MOUSE_STAY_ATTACK`) walks to a cell inside weapon
+  `Range=` and stops. Infantry play ART `Sequence` `FireUp` (bullet at
+  `FireUp=`) and `Die1`/`Die2` from warhead `InfDeath`; SHP vehicles use
+  `FiringFrames` / `DeathFrames`. Homing, arcing gravity, particles, lasers,
+  and prone crawl are not ported. Campaign infantry and vehicles use the map
+  `Mission=` token (`InfantryClass::Read_INI` / `UnitClass::Read_INI`): `Guard`
+  auto-acquires in `ThreatRange`, `Sleep` does not, `Hunt` is map-wide
+  `Greatest_Threat` then `Approach_Target`. Computer idle after a team is
+  `Guard` (`Enter_Idle_Mode`). `ALL_HUNT` pulls them off teams and hunts.
+  `LOCK_INPUT` hides the mouse and ignores clicks, keys, and edge
+  scroll until `UNLOCK_INPUT`; the sidebar still draws, and cameos appear
+  once a factory is owned. Scripted teams still run. A campaign
+  start posts `TXT_DIFFICULTY_LEVEL` then `TEXT_TRIGGER` lines at the
+  top of the tactical view. Drop-pod covering fire (`2 * DropPodWeapon`)
+  shells the LZ unless an ally other than the falling pod is there.
+  `[Triggers]` / `[Tags]` / `[CellTags]` load after houses; live-owner
   and difficulty flags match C++.   `LogicClass` springs `LogicTags` (`TEVENT_TIME`,
   `LOCAL_SET`) before factories, then objects, then `HouseTags` (`TEVENT_BUILD`,
   `ALL_DESTROYED`). GDI1A events `PLAYER_ENTERED`, `DESTROYED`/`DESTROYED_ANY`,
   `BUILD`, `ALL_DESTROYED`, `BUILDINGS_DESTROYED`, `TIME`, and `LOCAL_SET` fire.
   Actions `TEXT_TRIGGER` (TUTORIAL.INI), `SET_LOCAL`, `FORCE_TRIGGER` /
   `DESTROY_TRIGGER`, `REVEAL_SOME`, `CENTER_VIEWPOINT`, `LOCK_INPUT` /
-  `UNLOCK_INPUT`, and `WIN`/`LOSE` (message overlay, no score screen) run.
+  `UNLOCK_INPUT`, `ALL_HUNT`, `PLAY_MOVIE` / `PLAY_INGAME_MOVIE`, and `WIN`/`LOSE` (message overlay, no score screen) run.
   `[TaskForces]` / `[ScriptTypes]` / `[TeamTypes]` load after houses and before
   triggers. `CREATE_TEAM` recruits matching live members of that house.
   `REINFORCEMENTS` / `REINFORCEMENTS_SPECIAL` spawn the task force: drop-pod
-  infantry (`Droppod=yes`) appear at the team origin or action waypoint;
+  infantry (`Droppod=yes`) use `DropPodLocomotionClass` — `POD.SHP` on the
+  way down from `DropPodHeight`, `AtmosphereEntry` at the elevated start,
+  covering fire of `2 * DropPodWeapon` Attack every 3 frames at a
+  `CELL_LEPTON/3` scatter of the LZ unless that cell's techno is an ally,
+  then the `DropPod=` landing anim and the infantry at touchdown, or a
+  100-point `C4Warhead` blast and deletion if the cell has no free spot;
   transports such as DSHP carry passengers as cargo and `UNLOAD` them after
   the aircraft has landed (`FlyLocomotionClass` heading, `CurrentSpeed`
   ease, dropship climb 16, `SlowdownDistance` approach). A loaner then
@@ -77,10 +116,33 @@ game.
   `CHANGE_HOUSE`. Placing a building with `FreeUnit=` (the GDI1A refinery)
   spawns that vehicle to the south and starts `MISSION_HARVEST`. Harvesters
   walk to overlay Tiberium, lift one unit per `HarvesterLoadRate` animation
-  cycle, then dock east of a `Dock=` refinery and dump at `HarvesterDumpRate`
-  into building `Storage=`. The credit tab is `Credits` plus stored Tiberium
-  `Value=`. Harvest SHP, radio tether, weeders, and EVA are not. Full
-  attack-quarry AI, movies, and the score screen are not. `HouseClass::AI` still only recalcs power; computer
+  cycle, then enter the `Dock=` refinery pad (`Get_Cell()+(2,1)`, the bib
+  cell `RADIO_MOVE_HERE` uses) and dump at `HarvesterDumpRate` into building
+  `Storage=`. The credit tab is `Credits` plus stored Tiberium
+  `Value=`. Harvest SHP, full radio tether, weeders, and EVA are not. Engineer
+  capture, C4 sabotage, and the score screen are not. Movies follow the C++
+  sequence: `WWLOGO.VQA` after MIX load, then `TS_Title.VQA` /
+  `FS_Title.VQA` when picking Tiberian Sun or Firestorm from `GMENU`
+  (`FS_TITLE`/`STARTUP` only when `GMENU.MIX` is absent). Intro plays
+  `INTR#`/`INTRO.VQA` then `SIZZLE1.VQA`. A campaign start plays
+  `Choose_Side`, then scenario `Intro`/`Brief`/`Action`, trigger
+  `PLAY_MOVIE` / `PLAY_INGAME_MOVIE` (radar pane, with the VQA soundtrack), and `Win`/`Lose`.
+  After MIX load the page reads `SOUND.INI` / `SOUND01.INI` into `VocClass`
+  and `THEME.INI` / `THEME01.INI` into `ThemeClass`. Menu clicks play
+  `AudioVisual` `GenericClick`. Weapons play `Report=` through
+  `Sound_Effect_At` using the tactical view for volume and pan. Scores
+  stream from `SCORES.MIX` (`Theme.Play_Song` / `Queue_Song` / `AI`) at
+  `Options.ScoreVolume` (default 0.5); effects use `Options.SoundVolume`
+  (default 0.7); EVA uses `Options.VoiceVolume` (default 1.0). Westwood
+  `.AUD` (PCM, delta, SOS/IMA) is decoded in the page. EVA queues through
+  `Speak` / `Speech[]` (`VOX_UNIT_READY`, `VOX_CONSTRUCTION`, `VOX_BUILDING`,
+  `VOX_TRAINING`, `VOX_NO_FACTORY`, `VOX_CANCELED`, `VOX_DEPLOY`,
+  `VOX_REINFORCEMENTS`, `VOX_ACCOMPLISHED` / `VOX_FAIL`, trigger
+  `PLAY_SPEECH`). `CENTER_VIEWPOINT` pans with `Setup_Trigger_Scroll` (lerp
+  at the action's scroll speed) rather than jumping. Explosion SHPs play ART `Report=` / `StartSound=` at
+  spawn and `ExpireSound=` on death. The menu Options item opens the lite
+  volume sliders (Music / Sound / Voice, 0–10).
+  `HouseClass::AI` still only recalcs power; computer
   base-building is not. `Assign_Handicap` is not.
   Voxel units load `.VXL`/`.HVA` (plus `TUR`/`BARL`/`W` pieces) and project
   through the isometric view matrix and body facing. The view is the 640x400
@@ -98,7 +160,9 @@ game.
   `AlphaBuffer`. The power bar is `PowerClass` pips from `POWERP.SHP`, scaled
   from player `Power=` / drain. Radar plots mapped terrain and house-color
   blips in the `RADAR.SHP` pane when a `Radar=yes` building is powered (or
-  `FreeRadar=yes`); clicking it jumps `TacticalCoord`. Clicking a mapped
+  `FreeRadar=yes`); each pane pixel is coloured from
+  `Radar_Pixel_To_Cell` the way `Plot_Radar_Pixel` fills
+  `BackgroundSurface`. Clicking it jumps `TacticalCoord`. Clicking a mapped
   techno selects it (`MOUSE_CAN_SELECT`) through `Get_Selectable_Object`
   (near the object's position, then `Cell_Occupier`: last non-building whose
   origin is that cell, else the building occupying it). Buildings blit from
@@ -156,16 +220,32 @@ game.
   `Region_Threat` * `ThreatAvoidanceCoefficient` on rough/coarse edges,
   up to five banned-edge retries after `Ban_Blocked_Subzone_Edges`, then
   cell A* with a Euclidean heuristic, facing tie-break costs, and
-  `TUNNEL` jumps through `[Tubes]`). Overlay `bridge=true` cells mark
-  `IsUnderBridge` and stitch subzone links at span ends plus the
-  perpendicular side cells. `hs_anchor` maps a deck cell to the nearer
-  span end before hierarchical search. `Cut_Corners` /
-  `Optimize_Moves` skip tunnel steps. `MapClass::Reset_Subzone` builds
-  fine/rough/coarse blocks (2x2, 4x4, 8x8). `FootClass::Can_Reach`
-  forbids a height change other than 0, or 1 when the lower cell has a
-  TMP ramp, or 4 when either cell is under a bridge deck.
+  `TUNNEL` jumps through `[Tubes]`). `Cut_Corners` / `Optimize_Moves`
+  skip tunnel steps. `MapClass::Reset_Subzone` builds fine/rough/coarse
+  blocks (2x2, 4x4, 8x8). `BRIDGE1`/`BRIDGE2`/`RAILBRDG1`/`RAILBRDG2`
+  overlay cells call `Set_Under_Bridge` and mark a 3-cell-wide deck
+  (`IsUnderBridge`, `IsBridgeTraversable`; the far strip cell is not
+  traversable). Theater `BridgeSet`/`TrainBridgeSet` TMP spans record
+  `ZoneConnections` like `MapClass::Compute_Zone_Connections`, union the
+  bank zones, and stitch subzone links at the span ends. `hs_anchor`
+  maps a deck cell to the nearer span end. Cell A* may step a
+  traversable deck cell that is outside the hierarchical corridor.
   `CliffBackImpassability=2` marks cells 4+ below listed neighbours as
-  `LAND_ROCK`. Overlay `Wall=yes` cells are impassable. Owned
+  `LAND_ROCK` and does not block a traversable deck cell.
+  `FootClass::Can_Reach` allows height 0, height 1 when the lower cell
+  has a TMP ramp, or height 4 onto a traversable deck. TMP `TileType`
+  maps to `LandType`; `Can_Enter_Cell` refuses a cell whose
+  `Ground[land].Cost[SpeedType]` is 0 unless the step is on a bridge
+  deck (`IsUnderBridge` and a height-4 climb or already on spanned
+  cells). Infantry default `SPEED_FOOT`, aircraft `SPEED_WINGED`
+  (always pass), vehicles `SPEED_WHEEL` or `SPEED_TRACK` if
+  `Crusher=yes`, then `SpeedType=`. Hover/float/amphibious columns come
+  from RULES `[Water]` and the other land sections. Overlay
+  `NoUseTileLandType` (the default, and low `LOBRDG` pieces) keeps the
+  overlay `Land=`; high `BRIDGE1`/`BRIDGE2` set that flag to no, so the
+  water/rock tile remains and the deck is the walkable path. Overlay
+  `Wall=yes` cells are impassable. Player move
+  orders require `Can_Player_Move` (`House->Is_Player_Control()`). Owned
   `Gate=yes` buildings return `MOVE_CLOSED_GATE` until
   `MapClass::Try_Open_Gate` / `BuildingClass::Open_Gate` finishes
   (`GateStages`, `DeployTime`, `GateCloseDelay`). Gate `Sort_Y` is 16
@@ -213,7 +293,11 @@ game.
   `Move_Coord` along `PrimaryFacing`, `CurrentSpeed` eases toward
   `TargetSpeed` by 0.1 per frame, dropships climb at most 16 leptons, and
   `IsDropship` eases `FlightLevel` inside `SlowdownDistance` before
-  `Land()`. Ground occupy is ignored. The waypoint button calls
+  `Land()`. Below 300 leptons `Process_Landing` sets `CommencedLanding`,
+  plays `AuxSound2`, and spawns `DROPLAND` (`IsDropship`) or `CARYLAND`
+  (`Carryall`). `Take_Off` plays `AuxSound1`. Aircraft shadows sit on
+  ground height (`Get_Height_GL`), not at `HeightAGL`. Ground occupy is
+  ignored. The waypoint button calls
   `Waypoint_Mode_Control` (`0` off, `1` on, `-1` toggle; starts
   `HouseClass::New_Waypoint_Path`, refused when all 12 paths are in use).
   Those modes `Unselect_All`, so `ScrollClass::What_Action` only applies
@@ -239,9 +323,8 @@ game.
   (arrow cursors `MOUSE_N`…`MOUSE_NW`, barred when `Scroll_Dir` cannot
   move). The camera is `TacticalCoord` (view center); `TacPixel` subtracts
   half the tactical rect before blit, and `Tactical_Position_Limits` clamp
-  that center. Arrow keys also pan. Escape returns to the menu. Skirmish lists
-  `MISSIONS.PKT` and loose `.MPR` maps the same way. Movies and save/load are
-  not playable yet.
+  that center. Arrow keys also pan. Escape returns to the menu.   Skirmish lists
+  `MISSIONS.PKT` and loose `.MPR` maps the same way. Save/load is not.
 
 ## Commands
 

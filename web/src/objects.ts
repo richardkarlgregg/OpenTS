@@ -11,8 +11,10 @@
  ******************************************************************************/
 
 import { cc_retrieve } from "./ccfile";
+import { Do_Movies } from "./movies";
 import {
 	Attach_Named_Tag,
+	Add_Message,
 	Distribute_Tags,
 	Init_Triggers,
 	Logic_AI,
@@ -26,6 +28,9 @@ import {
 	TagTypeClass,
 	TriggerTypeClass,
 	Set_Local,
+	Difficulty_Start_Text,
+	TEVENT_ENEMY_IN_SPOTLIGHT,
+	TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING,
 	type TagClass,
 } from "./trigger";
 import {
@@ -50,7 +55,9 @@ import {
 	TMISSION_MOVECELL,
 	TMISSION_PANIC,
 	TMISSION_PATROL,
+	TMISSION_PLAY_SOUND,
 	TMISSION_PLAY_SPEECH,
+	TMISSION_CENTER_VIEWPOINT,
 	TMISSION_SET_LOCAL,
 	TMISSION_UNLOAD,
 	TMISSION_UNPANIC,
@@ -58,6 +65,13 @@ import {
 	type PendingTeam,
 } from "./team";
 import { FactoryClass, Time_To_Build, type FactoryObject } from "./factory";
+import {
+	Attach_Building_Light,
+	BuildingLight_AI,
+	Detach_Building_Light,
+	type BuildingLightClass,
+	type SpotlightRules,
+} from "./blight";
 import type { GameDirectory } from "./files";
 import {
 	Acts_Like_Name,
@@ -81,19 +95,37 @@ import { INIClass, type Point2D, type Rect } from "./ini";
 import {
 	FIRE_AMMO,
 	FIRE_CANT,
+	FIRE_FACING,
 	FIRE_ILLEGAL,
 	FIRE_OK,
 	FIRE_RANGE,
 	FIRE_REARM,
 	Armor_From_Name,
+	Combat_Anim,
 	In_Range,
 	Modify_Damage,
 	Read_Combat_Tables,
+	Find_Or_Make_Warhead,
 	Find_Or_Make_Weapon,
 	type BulletTypeClass,
 	type WarheadTypeClass,
 	type WeaponTypeClass,
 } from "./weapon";
+import { Menu_Click_Sound, Sound_Effect, Sound_Effect_At, VocClass, VOC_NONE } from "./voc";
+import {
+	Speak,
+	VOX_ACCOMPLISHED,
+	VOX_BUILDING,
+	VOX_CANCELED,
+	VOX_CONSTRUCTION,
+	VOX_DEPLOY,
+	VOX_FAIL,
+	VOX_NO_FACTORY,
+	VOX_REINFORCEMENTS,
+	VOX_SUSPENDED,
+	VOX_TRAINING,
+	VOX_UNIT_READY,
+} from "./vox";
 import { ISO_TILE_PIXEL_H, LEVEL_PIXEL_H } from "./isotile";
 import { lcw_straw_decompress } from "./lcw";
 import {
@@ -138,31 +170,54 @@ import {
 	Adjacent_Cell,
 	Apply_Coord,
 	Assign_Destination,
+	BRIDGE_CELL_HEIGHT,
 	Can_Reach,
 	Cell_Center,
 	Coord_Cell,
 	Direction_Facing,
 	FACING_NONE,
 	Facing_Dir256,
+	LAND_COUNT,
+	LAND_CLEAR,
+	LAND_NAMES,
+	LAND_TIBERIUM,
 	Make_Foot,
 	Movement_AI,
+	SPEED_COUNT,
+	SPEED_FOOT,
+	SPEED_NAMES,
+	SPEED_TRACK,
+	SPEED_WHEEL,
+	SPEED_WINGED,
 	Scale_To_256,
 	TUNNEL,
+	lepton_offset,
+	terrain_of,
 	type CellTerrain,
 	type FootState,
 	type PathEnter,
 } from "./walk";
 import { Body_Dir256, Drive_AI, Set_Drive_Facing } from "./drive";
 import { Dir256_Toward, Fly_AI } from "./fly";
-import { Build_Path_Graph, graph_cell, Threat_Region, type PathGraph, type TubePath } from "./zone";
+import {
+	Clamp_DropPod_Angle,
+	Coord_Scatter,
+	DropPod_AI,
+	DropPod_Drawing_Code,
+	DropPod_Facing,
+	DropPod_Move_To,
+} from "./droppod";
+import { Build_Path_Graph, graph_cell, Threat_Region, type HighBridgeMark, type PathGraph, type TubePath } from "./zone";
 
 const MAP_CELL_W = 512;
 const MAP_CELL_H = 512;
+const BUILDING_UPGRADE_MAX = 3;
 const OVERLAY_NONE = 0xff;
 const OVERLAYDATA_WALL_FRAME_MASK = 0x0f;
 const OVERLAYDATA_BRIDGE_NS_FULL1 = 9;
 const OVERLAYDATA_BRIDGE_NS_END2 = 17;
 const CELL_LEPTON = 256;
+const LANDING_COMMENCE_HEIGHT = 300;
 const GATE_START_OPENING = 0;
 const GATE_OPENING = 1;
 const GATE_OPEN = 2;
@@ -171,6 +226,35 @@ const GATE_CLOSING = 4;
 const GATE_CLOSED = 5;
 export let ActionLineTimer = 0;
 const HUMAN_SHAPE = [7, 7, 6, 6, 6, 6, 5, 5, 5, 5, 4, 4, 4, 4, 3, 3, 3, 3, 2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 7, 7];
+const DO_STAND_READY = 0;
+const DO_FIRE_WEAPON = 4;
+const DO_GUN_DEATH = 11;
+const DO_EXPLOSION_DEATH = 12;
+const DO_FIRE_DEATH = 15;
+const SEQUENCE_NAMES = [
+	"Ready",
+	"Guard",
+	"Prone",
+	"Walk",
+	"FireUp",
+	"Down",
+	"Crawl",
+	"Up",
+	"FireProne",
+	"Idle1",
+	"Idle2",
+	"Die1",
+	"Die2",
+	"Die3",
+	"Die4",
+	"Die5",
+	"Hover",
+	"Fly",
+	"Tumble",
+	"FireFly",
+	"Struggle",
+];
+const MASTER_DO_RATE = [0, 0, 6, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3];
 const STOPPING_COORD = [
 	{ x: CELL_LEPTON / 2, y: CELL_LEPTON / 2 },
 	{ x: CELL_LEPTON / 4, y: CELL_LEPTON / 4 },
@@ -213,6 +297,9 @@ export type SpriteAnim = {
 	reverse: boolean;
 	brand_new: boolean;
 	dead: boolean;
+	sound: number;
+	start_sound: number;
+	expire_sound: number;
 };
 
 export type SpriteSelect =
@@ -258,9 +345,11 @@ export type MapSprite = {
 	strength: number;
 	veteran: boolean;
 	bridge: boolean;
+	bridge_facing: number;
 	owned: boolean;
 	house: number;
 	type_name: string;
+	overlay_land: number;
 	foot: FootState | null;
 	gate: GateState | null;
 	repairing: boolean;
@@ -273,6 +362,8 @@ export type MapSprite = {
 	arm: number;
 	ammo: number;
 	attack_mission: boolean;
+	hunt_mission: boolean;
+	sleep_mission: boolean;
 	tag: TagClass | null;
 	team: TeamClass | null;
 	cargo: MapSprite[];
@@ -281,6 +372,22 @@ export type MapSprite = {
 	storage: number[];
 	harvest: HarvestState | null;
 	tib: number;
+	is_firing: boolean;
+	is_dying: boolean;
+	doing: number;
+	do_stage: number;
+	do_timer: number;
+	do_rate: number;
+	firing_sync: number;
+	death_counter: number;
+	upgrades: string[];
+	building_light: BuildingLightClass | null;
+};
+
+type DoInfo = {
+	frame: number;
+	count: number;
+	jump: number;
 };
 
 export type HarvestState = {
@@ -328,7 +435,10 @@ export type MapArtwork = {
 	sidebar: SidebarStrips;
 	production: ProductionState;
 	terrain: Map<string, CellTerrain>;
+	ground: number[][];
 	path_graph: PathGraph | null;
+	bridge_set: number;
+	train_bridge_set: number;
 	tubes: TubePath[];
 	is_repair_mode: boolean;
 	is_sell_mode: boolean;
@@ -356,20 +466,26 @@ export type MapArtwork = {
 	max_damage: number;
 	waypoints: Map<number, Point2D>;
 	cell_tags: Map<string, TagClass>;
-	message: string;
-	message_timer: number;
+	messages: { text: string; timer: number }[];
 	center_on: Point2D | null;
+	center_speed: number;
 	input_locked: boolean;
 	ended: "" | "win" | "lose";
 	reveal_radius: number;
 	is_global_changed: boolean;
 	shroud_map: ShroudMap | null;
 	pending_teams: PendingTeam[];
+	pending_movie: string[];
+	pending_ingame: string[];
+	win_movie: string;
+	lose_movie: string;
 	tiberiums: TiberiumType[];
 	harvester_load_rate: number;
 	harvester_dump_rate: number;
 	tiberium_long_scan: number;
 	tiberium_short_scan: number;
+	spotlight: SpotlightRules;
+	building_lights: BuildingLightClass[];
 };
 
 export type PendingPlace = {
@@ -407,6 +523,17 @@ export type ProductionState = {
 	flight_level: number;
 	max_waypoint_path_length: number;
 	waypoint_animation_speed: number;
+	drop_pod_height: number;
+	drop_pod_speed: number;
+	drop_pod_angle: number;
+	drop_pod_anims: string[];
+	atmosphere_entry: string;
+	drop_pod_weapon: string;
+	c4_warhead: string;
+	pod_file: string;
+	effect_files: Map<string, string>;
+	dead_bodies: string[];
+	infantry_explode: string;
 };
 
 type OverlayType = {
@@ -418,6 +545,9 @@ type OverlayType = {
 	tiberium: boolean;
 	crate: boolean;
 	bridge: boolean;
+	bridge_facing: number;
+	land: number;
+	no_use_tile: boolean;
 };
 
 type AnimOffset = {
@@ -448,14 +578,23 @@ export type ShapeType = {
 	light_red: number;
 	light_green: number;
 	light_blue: number;
+	has_spotlight: boolean;
 	facings: number;
 	walk_frames: number;
+	walk_rate: number;
 	standing_frames: number;
 	start_stand: number;
 	start_walk: number;
 	ready_frame: number;
 	ready_count: number;
 	ready_jump: number;
+	firing_frames: number;
+	start_firing: number;
+	death_frames: number;
+	death_frame_rate: number;
+	start_death: number;
+	do_controls: DoInfo[];
+	fire_launch: number;
 	turret: boolean;
 	sight: number;
 	power: number;
@@ -478,6 +617,7 @@ export type ShapeType = {
 	cost: number;
 	adjacent: number;
 	speed: number;
+	speed_type: number;
 	rot: number;
 	gdi_barracks: boolean;
 	nod_barracks: boolean;
@@ -498,6 +638,9 @@ export type ShapeType = {
 	helipad: boolean;
 	flight_level: number;
 	is_dropship: boolean;
+	carryall: boolean;
+	aux_sound1: number;
+	aux_sound2: number;
 	slowdown_distance: number;
 	undeploys_into: string;
 	construction_yard: boolean;
@@ -517,6 +660,7 @@ export type ShapeType = {
 	free_unit: string;
 	harvester: boolean;
 	refinery: boolean;
+	dock_unload: boolean;
 	capacity: number;
 	dock: string[];
 };
@@ -533,6 +677,17 @@ type TiberiumType = {
 function is_bridge_name(name: string, graphic: string): boolean {
 	const text = `${name} ${graphic}`.toUpperCase();
 	return text.includes("BRIDGE") || text.includes("LOBRDG");
+}
+
+function bridge_facing_of(name: string): number {
+	const key = name.toUpperCase();
+	if (key === "BRIDGE1" || key === "RAILBRDG1") {
+		return 0;
+	}
+	if (key === "BRIDGE2" || key === "RAILBRDG2") {
+		return 6;
+	}
+	return -1;
 }
 
 function hsv_to_rgb(hue: number, saturation: number, value: number): [number, number, number] {
@@ -894,9 +1049,11 @@ function make_sprite(
 		strength: 0,
 		veteran: false,
 		bridge: false,
+		bridge_facing: -1,
 		owned: false,
 		house: HOUSE_NONE,
 		type_name: "",
+		overlay_land: -1,
 		foot: null,
 		gate: null,
 		repairing: false,
@@ -909,6 +1066,8 @@ function make_sprite(
 		arm: 0,
 		ammo: -1,
 		attack_mission: false,
+		hunt_mission: false,
+		sleep_mission: false,
 		tag: null,
 		team: null,
 		cargo: [],
@@ -917,6 +1076,16 @@ function make_sprite(
 		storage: [],
 		harvest: null,
 		tib: -1,
+		is_firing: false,
+		is_dying: false,
+		doing: DO_STAND_READY,
+		do_stage: 0,
+		do_timer: 0,
+		do_rate: 0,
+		firing_sync: -1,
+		death_counter: -1,
+		upgrades: [],
+		building_light: null,
 		...extra,
 	};
 }
@@ -954,6 +1123,9 @@ type AnimTypeData = {
 	normalized: boolean;
 	pingpong: boolean;
 	reverse: boolean;
+	sound: number;
+	start_sound: number;
+	expire_sound: number;
 };
 
 function read_anim_type(art: INIClass, name: string): AnimTypeData {
@@ -972,6 +1144,9 @@ function read_anim_type(art: INIClass, name: string): AnimTypeData {
 		normalized: art.get_bool(name, "Normalized", false),
 		pingpong: art.get_bool(name, "PingPong", false),
 		reverse: art.get_bool(name, "Reverse", false),
+		sound: VocClass.From_Name(art.get_string(name, "Report", "")),
+		start_sound: VocClass.From_Name(art.get_string(name, "StartSound", "")),
+		expire_sound: VocClass.From_Name(art.get_string(name, "ExpireSound", "")),
 	};
 }
 
@@ -997,6 +1172,9 @@ function create_anim(type: AnimTypeData): SpriteAnim {
 		reverse: type.reverse,
 		brand_new: true,
 		dead: false,
+		sound: type.sound,
+		start_sound: type.start_sound,
+		expire_sound: type.expire_sound,
 	};
 }
 
@@ -1010,6 +1188,82 @@ function bind_anim_shape(anim: SpriteAnim, frames: number): void {
 	if (anim.reverse) {
 		anim.stage = anim.loop_end;
 		anim.step = -1;
+	}
+}
+
+function spawn_map_anim(
+	artwork: MapArtwork,
+	name: string,
+	lx: number,
+	ly: number,
+	height_agl = 0,
+	layer = 5,
+): void {
+	if (!name) {
+		return;
+	}
+	const file = artwork.production.effect_files.get(name.toUpperCase());
+	if (!file) {
+		return;
+	}
+	const shape = artwork.shapes.get(file);
+	if (!shape) {
+		return;
+	}
+	const cell = Coord_Cell(lx, ly);
+	const anim = create_anim(read_anim_type(artwork.production.art, name));
+	bind_anim_shape(anim, shape.frames.length);
+	if (anim.sound !== VOC_NONE) {
+		Sound_Effect_At(anim.sound, lx, ly, height_agl);
+	}
+	if (anim.start_sound !== VOC_NONE) {
+		Sound_Effect_At(anim.start_sound, lx, ly, height_agl);
+	}
+	const offset = lepton_offset(lx, ly);
+	const foot = Make_Foot(cell, 1);
+	foot.lx = lx;
+	foot.ly = ly;
+	foot.height_agl = height_agl;
+	artwork.sprites.push(
+		make_sprite(cell.x, cell.y, [], "unit", layer, {
+			file,
+			healthy_file: file,
+			ox: offset.ox,
+			oy: offset.oy,
+			anim,
+			frame: anim.start + anim.stage,
+			cast_shadow: false,
+			selectable: false,
+			occupy: [],
+			foot,
+		}),
+	);
+}
+
+function Play_Aircraft_Aux_Sounds(
+	artwork: MapArtwork,
+	sprite: MapSprite,
+	type: ShapeType,
+	was_taking_off: boolean,
+): void {
+	const foot = sprite.foot;
+	if (!foot) {
+		return;
+	}
+	if (foot.is_taking_off && !was_taking_off && type.aux_sound1 !== VOC_NONE) {
+		Sound_Effect_At(type.aux_sound1, foot.lx, foot.ly, foot.height_agl);
+	}
+	if (!foot.is_landing || foot.commenced_landing || foot.height_agl >= LANDING_COMMENCE_HEIGHT) {
+		return;
+	}
+	foot.commenced_landing = true;
+	if (type.is_dropship) {
+		spawn_map_anim(artwork, "DROPLAND", foot.lx, foot.ly, 0);
+	} else if (type.carryall) {
+		spawn_map_anim(artwork, "CARYLAND", foot.lx, foot.ly, 0);
+	}
+	if (sprite.strength > 0 && type.aux_sound2 !== VOC_NONE) {
+		Sound_Effect_At(type.aux_sound2, foot.lx, foot.ly, 0);
 	}
 }
 
@@ -1056,11 +1310,19 @@ export function Anim_Logic(sprite: MapSprite): void {
 		if (anim.loops) {
 			anim.stage = anim.reverse ? anim.loop_end : anim.loop_start - anim.start;
 		} else {
+			if (anim.expire_sound !== VOC_NONE) {
+				const foot = sprite.foot;
+				Sound_Effect_At(anim.expire_sound, foot?.lx ?? Cell_Center(sprite).x, foot?.ly ?? Cell_Center(sprite).y, foot?.height_agl ?? 0);
+			}
 			anim.dead = true;
 			return;
 		}
 	}
 	sprite.frame = anim.start + anim.stage;
+}
+
+export function Prune_Dead_Anims(artwork: MapArtwork): void {
+	artwork.sprites = artwork.sprites.filter((sprite) => !(sprite.anim?.dead && !sprite.rtti && !sprite.corner));
 }
 
 function theater_filename(name: string, letter: string): string {
@@ -1079,7 +1341,7 @@ function typed_shapes(rules: INIClass, art: INIClass, section: string): Map<stri
 	const names = list_types(rules, section);
 	for (let i = 0; i < names.length; i++) {
 		const name = names[i]!;
-		const type = read_shape_type(rules, art, name);
+		const type = read_shape_type(rules, art, name, section);
 		type.heap_id = i;
 		table.set(name.toUpperCase(), type);
 	}
@@ -1100,19 +1362,27 @@ function list_types(ini: INIClass, section: string): string[] {
 
 function read_overlay_type(rules: INIClass, art: INIClass, name: string): OverlayType {
 	const graphic = rules.get_string(name, "Image", name) || name;
+	const tiberium = rules.get_bool(name, "Tiberium", false);
+	let land = land_from_name(rules.get_string(name, "Land", ""), LAND_CLEAR);
+	if (tiberium && land === LAND_CLEAR) {
+		land = LAND_TIBERIUM;
+	}
 	return {
 		name,
 		graphic,
 		theater: art.get_bool(graphic, "Theater", false),
 		new_theater: art.get_bool(graphic, "NewTheater", false),
 		wall: rules.get_bool(name, "Wall", false),
-		tiberium: rules.get_bool(name, "Tiberium", false),
+		tiberium,
 		crate: rules.get_bool(name, "Crate", false),
 		bridge: is_bridge_name(name, graphic),
+		bridge_facing: bridge_facing_of(name),
+		land,
+		no_use_tile: rules.get_bool(name, "NoUseTileLandType", true),
 	};
 }
 
-function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeType {
+function read_shape_type(rules: INIClass, art: INIClass, name: string, type_list = ""): ShapeType {
 	const graphic = rules.get_string(name, "Image", name) || name;
 	const art_image = art.get_string(graphic, "Image", graphic) || graphic;
 	const to_overlay = art.get_string(graphic, "ToOverlay", "");
@@ -1170,7 +1440,11 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		light_red: Math.floor(rules.get_float(name, "LightRedTint", 1) * NORMAL_LIGHT + 0.1),
 		light_green: Math.floor(rules.get_float(name, "LightGreenTint", 1) * NORMAL_LIGHT + 0.1),
 		light_blue: Math.floor(rules.get_float(name, "LightBlueTint", 1) * NORMAL_LIGHT + 0.1),
+		has_spotlight: rules.get_bool(name, "HasSpotlight", false),
+		walk_rate: Math.max(1, rules.get_int(name, "WalkRate", 1)),
 		...read_facing(art, graphic, art_image),
+		...read_do_controls(art, graphic, art_image),
+		turret: rules.get_bool(name, "Turret", false),
 		sight: rules.get_int(name, "Sight", 0),
 		power: read_power(rules, name).output,
 		drain: read_power(rules, name).drain,
@@ -1191,6 +1465,7 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		cost: rules.get_int(name, "Cost", 0),
 		adjacent: rules.get_int(name, "Adjacent", 3),
 		speed: Scale_To_256(rules.get_int(name, "Speed", 0)),
+		speed_type: read_speed_type(rules, name, type_list),
 		rot: rules.get_int(name, "ROT", 0),
 		gdi_barracks: rules.get_bool(name, "GDIBarracks", false),
 		nod_barracks: rules.get_bool(name, "NODBarracks", false),
@@ -1209,6 +1484,9 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		helipad: rules.get_bool(name, "Helipad", false),
 		flight_level: rules.get_int(name, "FlightLevel", -1),
 		is_dropship: rules.get_bool(name, "IsDropship", false),
+		carryall: rules.get_bool(name, "Carryall", false),
+		aux_sound1: VocClass.From_Name(rules.get_string(name, "AuxSound1", "")),
+		aux_sound2: VocClass.From_Name(rules.get_string(name, "AuxSound2", "")),
 		slowdown_distance: rules.get_int(name, "SlowdownDistance", 500),
 		undeploys_into: rules.get_string(name, "UndeploysInto", ""),
 		construction_yard: rules.get_bool(name, "ConstructionYard", false),
@@ -1231,8 +1509,9 @@ function read_shape_type(rules: INIClass, art: INIClass, name: string): ShapeTyp
 		free_unit: rules.get_string(name, "FreeUnit", ""),
 		harvester: rules.get_bool(name, "Harvester", false),
 		refinery: rules.get_bool(name, "Refinery", false),
+		dock_unload: rules.get_bool(name, "DockUnload", false),
 		capacity: rules.get_int(name, "Storage", 0),
-		dock: csv(rules.get_string(name, "Dock", "")),
+		dock: csv(rules.get_string(name, "Dock", "")).map((name) => name.toUpperCase()),
 	};
 }
 
@@ -1241,6 +1520,52 @@ function csv(value: string): string[] {
 		.split(",")
 		.map((part) => part.trim())
 		.filter((part) => part.length > 0);
+}
+
+function land_from_name(name: string, defvalue: number): number {
+	const key = name.trim().toLowerCase();
+	if (key.length === 0 || key === "<none>" || key === "none") {
+		return defvalue;
+	}
+	const index = LAND_NAMES.findIndex((entry) => entry.toLowerCase() === key);
+	return index >= 0 ? index : defvalue;
+}
+
+function speed_from_name(name: string, defvalue: number): number {
+	const key = name.trim().toLowerCase();
+	if (key.length === 0 || key === "<none>" || key === "none") {
+		return defvalue;
+	}
+	const index = SPEED_NAMES.findIndex((entry) => entry.toLowerCase() === key);
+	return index >= 0 ? index : defvalue;
+}
+
+function read_speed_type(rules: INIClass, name: string, section: string): number {
+	let speed = SPEED_FOOT;
+	if (section === "AircraftTypes") {
+		speed = SPEED_WINGED;
+	} else if (section === "VehicleTypes") {
+		speed = rules.get_bool(name, "Crusher", false) ? SPEED_TRACK : SPEED_WHEEL;
+	}
+	return speed_from_name(rules.get_string(name, "SpeedType", ""), speed);
+}
+
+function Read_Ground(ini: INIClass): number[][] {
+	const table: number[][] = [];
+	for (let land = 0; land < LAND_COUNT; land++) {
+		table.push(new Array(SPEED_COUNT).fill(0));
+	}
+	for (let land = 0; land < LAND_COUNT; land++) {
+		const section = LAND_NAMES[land]!;
+		if (!ini.is_present(section)) {
+			continue;
+		}
+		const row = table[land]!;
+		for (let speed = 0; speed < SPEED_COUNT; speed++) {
+			row[speed] = Math.min(ini.get_float(section, SPEED_NAMES[speed]!, row[speed] ?? 0), 1);
+		}
+	}
+	return table;
 }
 
 function rtti_from_name(raw: string): string {
@@ -1300,7 +1625,11 @@ function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
 	| "ready_frame"
 	| "ready_count"
 	| "ready_jump"
-	| "turret"
+	| "firing_frames"
+	| "start_firing"
+	| "death_frames"
+	| "death_frame_rate"
+	| "start_death"
 > {
 	const firing = art.get_int(graphic, "FiringFrames", 0);
 	const turret = art.get_bool(graphic, "Turret", false);
@@ -1316,6 +1645,15 @@ function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
 	let start_stand = standing_frames === 0 ? start_walk : facings * walk_frames;
 	start_stand = art.get_int(graphic, "StartStandFrame", start_stand);
 	start_walk = art.get_int(graphic, "StartWalkFrame", start_walk);
+	let start_firing = firing === 0 ? start_stand : facings * (standing_frames + walk_frames);
+	start_firing = art.get_int(graphic, "StartFiringFrame", start_firing);
+	const death_frames = art.get_int(graphic, "DeathFrames", 0);
+	let death_frame_rate = art.get_int(graphic, "DeathFrameRate", 1);
+	if (death_frame_rate < 1) {
+		death_frame_rate = 1;
+	}
+	let start_death = death_frames ? facings * (firing + walk_frames + 1) : -1;
+	start_death = art.get_int(graphic, "StartDeathFrame", start_death);
 	const seq = art.get_string(graphic, "Sequence", "") || art.get_string(art_image, "Sequence", "");
 	const ready = seq.length > 0 ? art.get_string(seq, "Ready", "") : "";
 	const bits = ready.split(",");
@@ -1328,7 +1666,38 @@ function read_facing(art: INIClass, graphic: string, art_image: string): Pick<
 		ready_frame: Number.parseInt(bits[0]?.trim() ?? "", 10) || 0,
 		ready_count: Number.parseInt(bits[1]?.trim() ?? "", 10) || 1,
 		ready_jump: Number.parseInt(bits[2]?.trim() ?? "", 10) || 0,
-		turret,
+		firing_frames: firing,
+		start_firing,
+		death_frames,
+		death_frame_rate,
+		start_death,
+	};
+}
+
+function empty_do_info(): DoInfo {
+	return { frame: 0, count: 0, jump: 0 };
+}
+
+function read_do_controls(art: INIClass, graphic: string, art_image: string): Pick<ShapeType, "do_controls" | "fire_launch"> {
+	const seq = art.get_string(graphic, "Sequence", "") || art.get_string(art_image, "Sequence", "");
+	const do_controls = SEQUENCE_NAMES.map(() => empty_do_info());
+	if (seq) {
+		for (let i = 0; i < SEQUENCE_NAMES.length; i++) {
+			const raw = art.get_string(seq, SEQUENCE_NAMES[i]!, "");
+			if (!raw) {
+				continue;
+			}
+			const bits = raw.split(",");
+			do_controls[i] = {
+				frame: Number.parseInt(bits[0]?.trim() ?? "", 10) || 0,
+				count: Number.parseInt(bits[1]?.trim() ?? "", 10) || 0,
+				jump: Number.parseInt(bits[2]?.trim() ?? "", 10) || 0,
+			};
+		}
+	}
+	return {
+		do_controls,
+		fire_launch: art.get_int(graphic, "FireUp", 0),
 	};
 }
 
@@ -1384,6 +1753,33 @@ function unit_stand_frame(type: ShapeType, dir: number): number {
 	return type.start_stand + face * type.standing_frames;
 }
 
+function unit_walk_frame(type: ShapeType, dir: number, walked: number): number {
+	const face = shape_facing_index(dir, type.facings);
+	const frames = Math.max(1, type.walk_frames);
+	return type.start_walk + face * frames + (walked % frames);
+}
+
+function unit_body_frame(type: ShapeType, sprite: MapSprite): number {
+	const foot = sprite.foot;
+	if (foot?.moving) {
+		return unit_walk_frame(type, sprite.dir, foot.walked);
+	}
+	if (sprite.firing_sync >= 0 && type.firing_frames > 0) {
+		return unit_fire_frame(type, sprite.dir, sprite.firing_sync);
+	}
+	return unit_stand_frame(type, sprite.dir);
+}
+
+function Advance_Walked(artwork: MapArtwork, sprite: MapSprite, type: ShapeType | null | undefined): void {
+	const foot = sprite.foot;
+	if (!foot?.moving || !type) {
+		return;
+	}
+	if (artwork.frame % type.walk_rate === 0) {
+		foot.walked += 1;
+	}
+}
+
 function infantry_ready_frame(type: ShapeType, dir: number): number {
 	let shapenum = 0;
 	if (type.ready_jump > 0) {
@@ -1399,6 +1795,30 @@ function infantry_walk_frame(type: ShapeType, dir: number, stage: number): numbe
 		shapenum += (HUMAN_SHAPE[round_facing(dir256_raw(dir), 10) % 32] ?? 0) * type.walk_jump;
 	}
 	return shapenum + type.walk_frame;
+}
+
+function infantry_do_frame(type: ShapeType, doing: number, stage: number, dir: number): number {
+	const info = type.do_controls[doing] ?? empty_do_info();
+	const count = Math.max(1, info.count);
+	let shapenum = stage % count;
+	if (info.jump > 0) {
+		shapenum += (HUMAN_SHAPE[round_facing(dir256_raw(dir), 10) % 32] ?? 0) * info.jump;
+	}
+	return shapenum + info.frame;
+}
+
+function unit_fire_frame(type: ShapeType, dir: number, delay: number): number {
+	const face = shape_facing_index(dir, type.facings);
+	return type.start_firing + Math.trunc(delay / 2) + face * type.firing_frames;
+}
+
+function unit_death_frame(type: ShapeType, counter: number): number {
+	const last = Math.max(0, type.death_frames - 1);
+	let deathframe = Math.trunc(counter / type.death_frame_rate);
+	if (deathframe > last) {
+		deathframe = last;
+	}
+	return deathframe + type.start_death;
 }
 
 function house_scheme(ini: INIClass, rules: INIClass, house: string): string {
@@ -1487,6 +1907,83 @@ function anim_files(stem: string, seed: TheaterSeed, art?: INIClass): string[] {
 	return names.flatMap((name) => [`${name}.SHP`, `${name}.${seed.suffix}`]);
 }
 
+function powerup_files(type: ShapeType, seed: TheaterSeed, art: INIClass): string[] {
+	if (type.voxel) {
+		return anim_files(type.graphic, seed, art);
+	}
+	return [...object_files(type, seed), ...anim_files(type.graphic, seed, art)];
+}
+
+function dir256_to_32(dir: number): number {
+	return round_facing(dir256_raw(dir), 10) % 32;
+}
+
+const TURRET_BODY_SHAPE = [
+	28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 31, 30, 29,
+];
+
+function turret_body_frame(dir: number): number {
+	return TURRET_BODY_SHAPE[dir256_to_32(dir)] ?? 0;
+}
+
+function powerup_frame(type: ShapeType, dir: number): number {
+	if (type.turret) {
+		return turret_body_frame(dir);
+	}
+	if (type.facings > 1) {
+		return unit_stand_frame(type, dir);
+	}
+	return shape_facing_index(dir, 32);
+}
+
+function parse_structure_upgrades(line: string): string[] {
+	const parts = line.split(",");
+	const count = Math.min(Math.max(token_int(parts, 10, 0), 0), BUILDING_UPGRADE_MAX);
+	const names: string[] = [];
+	for (let i = 0; i < count; i++) {
+		const name = (parts[12 + i] ?? "").trim();
+		if (name.length > 0 && name.toLowerCase() !== "none") {
+			names.push(name.toUpperCase());
+		}
+	}
+	return names;
+}
+
+function make_powerup_sprite(
+	parent: { x: number; y: number; type: ShapeType; scheme: string; owned: boolean; house: number },
+	upgrade: ShapeType,
+	slot: number,
+	seed: TheaterSeed,
+	art: INIClass,
+	dir = 0,
+): MapSprite | null {
+	const loc = parent.type.powerup_loc[slot] ?? { x: 0, y: 0 };
+	const extra = {
+		ox: loc.x,
+		oy: loc.y,
+		scheme: parent.scheme,
+		corner: true as const,
+		owned: parent.owned,
+		house: parent.house,
+		type_name: upgrade.name,
+		dir,
+	};
+	if (upgrade.voxel) {
+		return make_sprite(parent.x, parent.y, [], upgrade.terrain_palette ? "theater" : "unit", 4, {
+			voxel: upgrade.voxel_stem,
+			...extra,
+		});
+	}
+	const files = powerup_files(upgrade, seed, art);
+	if (files.length === 0) {
+		return null;
+	}
+	return make_sprite(parent.x, parent.y, files, upgrade.terrain_palette ? "theater" : "unit", 4, {
+		frame: powerup_frame(upgrade, dir),
+		...extra,
+	});
+}
+
 async function load_ini(directory: GameDirectory, filename: string): Promise<INIClass | null> {
 	const packed = await cc_retrieve(directory, filename);
 	if (!packed) {
@@ -1530,6 +2027,24 @@ async function fetch_shape(
 		}
 	}
 	return null;
+}
+
+async function load_named_shape(
+	directory: GameDirectory,
+	cache: Map<string, ShapeSet | null>,
+	shapes: Map<string, ShapeSet>,
+	names: string[],
+): Promise<string | null> {
+	const key = await fetch_shape(directory, cache, names);
+	if (!key) {
+		return null;
+	}
+	const shape = cache.get(key);
+	if (!shape) {
+		return null;
+	}
+	shapes.set(key, shape);
+	return key;
 }
 
 async function fetch_voxel_piece(directory: GameDirectory, stem: string): Promise<VoxelModel | null> {
@@ -1592,7 +2107,9 @@ function parse_overlay_pack(
 				scheme: type.tiberium ? tiberium_color(id, tiberiums) : "",
 				bright: type.tiberium ? "day" : type.wall ? "object" : "tile",
 				bridge: type.bridge,
+				bridge_facing: type.bridge_facing,
 				tib: type.tiberium ? tiberium_slot(id, tiberiums) : -1,
+				overlay_land: type.no_use_tile || type.wall ? type.land : -1,
 			}),
 		);
 	}
@@ -1636,7 +2153,27 @@ type PlacedObject = {
 	health: number;
 	veteran: boolean;
 	tag: string;
+	mission: string;
 };
+
+function token_mission(parts: string[], index: number): string {
+	return (parts[index]?.trim() ?? "").toLowerCase();
+}
+
+function is_hunt_mission(mission: string): boolean {
+	return mission === "hunt";
+}
+
+function is_sleep_mission(mission: string): boolean {
+	return mission === "sleep" || mission === "harmless" || mission === "ambush";
+}
+
+function placed_hunt(mission: string, type: ShapeType | null): boolean {
+	if (type?.harvester) {
+		return false;
+	}
+	return is_hunt_mission(mission);
+}
 
 function token_int(parts: string[], index: number, fallback: number): number {
 	const value = Number.parseInt(parts[index]?.trim() ?? "", 10);
@@ -1735,6 +2272,7 @@ function parse_placed(line: string, infantry: boolean, tag_index = infantry ? 8 
 			health,
 			veteran: token_int(parts, 9, 0) !== 0,
 			tag: token_tag(parts, tag_index),
+			mission: token_mission(parts, 6),
 		};
 	}
 	return {
@@ -1747,6 +2285,7 @@ function parse_placed(line: string, infantry: boolean, tag_index = infantry ? 8 
 		health,
 		veteran: token_int(parts, 8, 0) !== 0,
 		tag: token_tag(parts, tag_index),
+		mission: token_mission(parts, 6),
 	};
 }
 
@@ -1789,6 +2328,8 @@ function parse_infantry(
 			owned: owner === PlayerPtr,
 			ammo: type.ammo,
 			foot: Make_Foot({ x: parsed.x, y: parsed.y }, type.speed),
+			hunt_mission: placed_hunt(parsed.mission, type),
+			sleep_mission: is_sleep_mission(parsed.mission),
 		});
 		owner.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
 		const from = spot_coord({ x: parsed.x, y: parsed.y }, parsed.sub);
@@ -1847,6 +2388,8 @@ function parse_units(
 			ammo: type.ammo,
 			foot: unit_foot(type, { x: parsed.x, y: parsed.y }, parsed.dir),
 			harvest: harvest_state(type, 4),
+			hunt_mission: placed_hunt(parsed.mission, type),
+			sleep_mission: is_sleep_mission(parsed.mission),
 		};
 		if (type.voxel) {
 			const sprite = make_sprite(parsed.x, parsed.y, [], "unit", layer, {
@@ -1885,6 +2428,7 @@ function parse_structures(
 		name: string;
 		x: number;
 		y: number;
+		dir: number;
 		type: ShapeType;
 		scheme: string;
 		blip: number;
@@ -1893,10 +2437,12 @@ function parse_structures(
 		house: number;
 		owner: HouseClass;
 		tag: string;
+		upgrades: string[];
 	}[] = [];
 	const count = ini.entry_count("Structures");
 	for (let i = 0; i < count; i++) {
-		const parsed = parse_placed(ini.get_string("Structures", ini.get_entry("Structures", i)), false, 6);
+		const line = ini.get_string("Structures", ini.get_entry("Structures", i));
+		const parsed = parse_placed(line, false, 6);
 		if (!parsed) {
 			continue;
 		}
@@ -1905,13 +2451,17 @@ function parse_structures(
 			continue;
 		}
 		const type = types.get(parsed.name.toUpperCase());
-		if (!type || type.voxel || type.invisible || type.wall) {
+		if (!type || type.invisible || type.wall) {
+			continue;
+		}
+		if (type.voxel && !type.powers_up) {
 			continue;
 		}
 		placed.push({
 			name: parsed.name.toUpperCase(),
 			x: parsed.x,
 			y: parsed.y,
+			dir: parsed.dir,
 			type,
 			scheme: type.terrain_palette ? "" : owner.Scheme,
 			blip: house_blip_scheme(ini, rules, owner.Scheme),
@@ -1920,10 +2470,32 @@ function parse_structures(
 			house: owner.HeapID,
 			owner,
 			tag: parsed.tag,
+			upgrades: parse_structure_upgrades(line),
 		});
 	}
 	const sprites: MapSprite[] = [];
 	const addon_at = new Map<string, number>();
+	const attach_powerup = (
+		parent: (typeof placed)[number],
+		upgrade: ShapeType,
+		dir: number,
+	): void => {
+		const key = `${parent.x},${parent.y}`;
+		const slot = addon_at.get(key) ?? 0;
+		const overlay = make_powerup_sprite(parent, upgrade, slot, seed, art, dir);
+		if (!overlay) {
+			return;
+		}
+		addon_at.set(key, slot + 1);
+		sprites.push(overlay);
+	};
+	const remember_upgrade = (x: number, y: number, name: string): void => {
+		const key = name.toUpperCase();
+		const building = sprites.find((sprite) => sprite.rtti === "building" && sprite.x === x && sprite.y === y);
+		if (building && !building.upgrades.includes(key)) {
+			building.upgrades.push(key);
+		}
+	};
 	for (const item of placed) {
 		if (item.type.powers_up) {
 			const want = item.type.powers_up.toUpperCase();
@@ -1933,29 +2505,48 @@ function parse_structures(
 			if (!parent) {
 				continue;
 			}
-			const files = [...object_files(item.type, seed), ...anim_files(item.type.graphic, seed, art)];
-			if (files.length === 0) {
-				continue;
-			}
-			const key = `${parent.x},${parent.y}`;
-			const slot = addon_at.get(key) ?? 0;
-			addon_at.set(key, slot + 1);
-			const loc = parent.type.powerup_loc[slot] ?? { x: 0, y: 0 };
-			sprites.push(
-				make_sprite(parent.x, parent.y, files, item.type.terrain_palette ? "theater" : "unit", 4, {
-					ox: loc.x,
-					oy: loc.y,
-					scheme: item.scheme,
-					corner: true,
-					owned: item.owned,
-					house: item.house,
-				}),
-			);
+			attach_powerup(parent, item.type, item.dir);
 			continue;
 		}
 		sprites.push(
-			...structure_sprites(item.x, item.y, item.type, seed, art, item.scheme, item.blip, item.owned, item.house, item.owner, item.health, item.tag),
+			...structure_sprites(
+				item.x,
+				item.y,
+				item.type,
+				seed,
+				art,
+				item.scheme,
+				item.blip,
+				item.owned,
+				item.house,
+				item.owner,
+				item.health,
+				item.tag,
+				item.dir,
+			),
 		);
+		for (const name of item.upgrades) {
+			const upgrade = types.get(name);
+			if (!upgrade) {
+				continue;
+			}
+			attach_powerup(item, upgrade, item.dir);
+		}
+	}
+	for (const item of placed) {
+		if (item.type.powers_up) {
+			const want = item.type.powers_up.toUpperCase();
+			const parent = placed.find(
+				(other) => !other.type.powers_up && other.name === want && occupies(other, other.type.occupy, item.x, item.y),
+			);
+			if (parent) {
+				remember_upgrade(parent.x, parent.y, item.type.name);
+			}
+			continue;
+		}
+		for (const name of item.upgrades) {
+			remember_upgrade(item.x, item.y, name);
+		}
 	}
 	return sprites;
 }
@@ -1973,6 +2564,7 @@ function structure_sprites(
 	owner: HouseClass | null = null,
 	health = 256,
 	tag = "",
+	dir = 0,
 ): MapSprite[] {
 	const sprites: MapSprite[] = [];
 	const files = object_files(type, seed);
@@ -1996,6 +2588,7 @@ function structure_sprites(
 		ammo: type.ammo,
 		gate: type.gate ? Make_Gate(type) : null,
 		storage: type.capacity > 0 ? empty_storage(4) : [],
+		dir,
 	});
 	sprites.push(building);
 	Attach_Named_Tag(building, tag);
@@ -2323,6 +2916,7 @@ export async function load_map_artwork(
 	ini: INIClass,
 	theater_name: string,
 	log: (line: string) => void,
+	progress?: (percent: number) => Promise<void>,
 ): Promise<MapArtwork> {
 	const seed = theater_from_name(theater_name);
 	const rules = await load_ini(directory, "RULES.INI");
@@ -2335,6 +2929,11 @@ export async function load_map_artwork(
 	}
 	const rules_ini = rules ?? new INIClass();
 	const art_ini = art ?? new INIClass();
+	Do_Movies(art_ini);
+	const artfs = await load_ini(directory, "ARTFS.INI");
+	if (artfs) {
+		Do_Movies(artfs);
+	}
 	const theater_palette = await load_palette(directory, `ISO${seed.suffix}.PAL`, log);
 	const unit_palette = await load_palette(directory, `UNIT${seed.suffix}.PAL`, log);
 	const normal_palette = await load_palette(directory, "PALETTE.PAL", log);
@@ -2372,6 +2971,9 @@ export async function load_map_artwork(
 	Read_Locals(ini);
 	const tutorial = await load_ini(directory, "TUTORIAL.INI");
 	Read_Tutorial(tutorial, ini);
+	if (progress) {
+		await progress(50);
+	}
 	const waypoints = Read_Waypoints(ini);
 	const player_house = PlayerPtr;
 	const player = player_house?.Class.Name() || ini.get_string("Basic", "Player", "GDI") || "GDI";
@@ -2391,6 +2993,9 @@ export async function load_map_artwork(
 		...unit_sprites,
 		...aircraft_sprites,
 	];
+	if (progress) {
+		await progress(70);
+	}
 	const lighting = read_scenario_lighting(ini);
 	const lights = collect_lights(ini, buildings);
 	const credits = player_house?.Credits ?? 0;
@@ -2448,6 +3053,9 @@ export async function load_map_artwork(
 	const voxels_ready = new Map<string, VoxelModel>();
 	const ready: MapSprite[] = [];
 	const missing: string[] = [];
+	if (progress) {
+		await progress(80);
+	}
 	for (const sprite of sprites) {
 		if (sprite.voxel) {
 			const key = sprite.voxel.toUpperCase();
@@ -2483,6 +3091,24 @@ export async function load_map_artwork(
 			ready.push({ ...sprite, file: key, healthy_file: key, damage_file, frame: sprite.anim.start + sprite.anim.stage });
 		} else {
 			ready.push({ ...sprite, file: key, healthy_file: key, damage_file });
+		}
+	}
+
+	const drop_pod_anims = csv(rules_ini.get_string("AudioVisual", "DropPod", ""));
+	const atmosphere_entry = rules_ini.get_string("AudioVisual", "AtmosphereEntry", "");
+	const drop_pod_weapon = rules_ini.get_string("General", "DropPodWeapon", "");
+	const c4_warhead = rules_ini.get_string("CombatDamage", "C4Warhead", "");
+	const infantry_explode = rules_ini.get_string("AudioVisual", "InfantryExplode", "");
+	const dead_bodies = csv(rules_ini.get_string("AudioVisual", "DeadBodies", ""));
+	const effect_files = new Map<string, string>();
+	const pod_file = (await load_named_shape(directory, cache, shapes, ["POD.SHP"])) ?? "";
+	const effect_names = [...drop_pod_anims, atmosphere_entry, "SMOKEY", "DROPLAND", "CARYLAND"].filter(
+		(name) => name.length > 0,
+	);
+	for (const name of effect_names) {
+		const key = await load_named_shape(directory, cache, shapes, anim_files(name, seed, art_ini));
+		if (key) {
+			effect_files.set(name.toUpperCase(), key);
 		}
 	}
 
@@ -2536,6 +3162,32 @@ export async function load_map_artwork(
 	for (const table of [buildings, infantry, units, aircraft]) {
 		for (const type of table.values()) {
 			Find_Or_Make_Weapon(rules_ini, type.primary, combat);
+		}
+	}
+	Find_Or_Make_Weapon(rules_ini, drop_pod_weapon, combat);
+	Find_Or_Make_Warhead(rules_ini, c4_warhead, combat);
+	const blast_anims: string[] = [...dead_bodies];
+	if (infantry_explode) {
+		blast_anims.push(infantry_explode);
+	}
+	const drop_weapon = combat.weapons.get(drop_pod_weapon.toUpperCase());
+	if (drop_weapon?.WarheadPtr) {
+		blast_anims.push(...drop_weapon.WarheadPtr.AnimList);
+	}
+	const c4 = combat.warheads.get(c4_warhead.toUpperCase());
+	if (c4) {
+		blast_anims.push(...c4.AnimList);
+	}
+	for (const warhead of combat.warheads.values()) {
+		blast_anims.push(...warhead.AnimList);
+	}
+	for (const name of blast_anims) {
+		if (!name || effect_files.has(name.toUpperCase())) {
+			continue;
+		}
+		const key = await load_named_shape(directory, cache, shapes, anim_files(name, seed, art_ini));
+		if (key) {
+			effect_files.set(name.toUpperCase(), key);
 		}
 	}
 	log(`Weapons ${combat.weapons.size}, warheads ${combat.warheads.size}, projectiles ${combat.bullets.size}.`);
@@ -2597,9 +3249,23 @@ export async function load_map_artwork(
 			flight_level: rules_ini.get_int("General", "FlightLevel", 500),
 			max_waypoint_path_length: Math.max(1, rules_ini.get_int("General", "MaxWaypointPathLength", 15)),
 			waypoint_animation_speed: Math.max(1, rules_ini.get_int("AudioVisual", "WaypointAnimationSpeed", 12)),
+			drop_pod_height: rules_ini.get_int("General", "DropPodHeight", 1500),
+			drop_pod_speed: rules_ini.get_int("General", "DropPodSpeed", 40),
+			drop_pod_angle: Clamp_DropPod_Angle(rules_ini.get_float("General", "DropPodAngle", Math.PI / 2)),
+			drop_pod_anims,
+			atmosphere_entry,
+			drop_pod_weapon,
+			c4_warhead,
+			pod_file,
+			effect_files,
+			dead_bodies,
+			infantry_explode,
 		},
 		terrain: new Map(),
+		ground: Read_Ground(rules_ini),
 		path_graph: null,
+		bridge_set: -1,
+		train_bridge_set: -1,
 		tubes: parse_tubes(ini),
 		is_repair_mode: false,
 		is_sell_mode: false,
@@ -2627,27 +3293,45 @@ export async function load_map_artwork(
 		max_damage: combat.max_damage,
 		waypoints,
 		cell_tags: new Map(),
-		message: "",
-		message_timer: 0,
+		messages: [],
 		center_on: null,
+		center_speed: 0,
 		input_locked: false,
 		ended: "",
 		reveal_radius: rules_ini.get_int("General", "RevealTriggerRadius", 5),
 		is_global_changed: false,
 		shroud_map: null,
 		pending_teams: [],
+		pending_movie: [],
+		pending_ingame: [],
+		win_movie: "",
+		lose_movie: "",
 		tiberiums,
 		harvester_load_rate: Math.max(1, rules_ini.get_int("General", "HarvesterLoadRate", 2)),
 		harvester_dump_rate: Math.max(1, Math.round(rules_ini.get_float("General", "HarvesterDumpRate", 0.016) * TICKS_PER_MINUTE) | 0),
 		tiberium_long_scan: scan_cells(rules_ini, "AI", "TiberiumFarScan", 32),
 		tiberium_short_scan: scan_cells(rules_ini, "AI", "TiberiumNearScan", 6),
+		spotlight: {
+			SpotlightMovementRadius: rules_ini.get_int("General", "SpotlightMovementRadius", 2000),
+			SpotlightLocationRadius: rules_ini.get_int("General", "SpotlightLocationRadius", 1000),
+			SpotlightSpeed: rules_ini.get_float("General", "SpotlightSpeed", 0.05),
+			SpotlightAcceleration: rules_ini.get_float("General", "SpotlightAcceleration", 0.005),
+			SpotlightAngle: rules_ini.get_float("General", "SpotlightAngle", 20),
+			SpotlightRadius: rules_ini.get_int("General", "SpotlightRadius", 175),
+		},
+		building_lights: [],
 	};
 	Read_CellTags(ini, artwork);
 	Distribute_Tags();
+	Add_Message(artwork, Difficulty_Start_Text(), Math.max(1, Math.trunc(0.6 * TICKS_PER_MINUTE)));
 	log(`Triggers ${ini.entry_count("Triggers")}, tags ${ini.entry_count("Tags")}, cell tags ${artwork.cell_tags.size}, teams ${ini.entry_count("TeamTypes")}.`);
 	for (const sprite of artwork.sprites) {
 		if (sprite.rtti === "building") {
 			Apply_Health_Status(artwork, sprite);
+			const type = type_for_sprite(artwork, sprite);
+			if (type?.has_spotlight) {
+				Attach_Building_Light(artwork, sprite);
+			}
 		}
 	}
 	return artwork;
@@ -2655,6 +3339,10 @@ export async function load_map_artwork(
 
 export function LogicClass_AI(artwork: MapArtwork): void {
 	Logic_AI(artwork, artwork.shroud_map);
+	BuildingLight_AI(artwork, (owner) => {
+		owner.tag?.Spring(artwork, artwork.shroud_map, TEVENT_ENEMY_IN_SPOTLIGHT, owner);
+		owner.tag?.Spring(artwork, artwork.shroud_map, TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING, owner);
+	});
 }
 
 export function Team_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shroud: ShroudMap | null): void {
@@ -2755,6 +3443,8 @@ function recruit_team(artwork: MapArtwork, team: TeamClass): void {
 				continue;
 			}
 			team.Add(sprite);
+			sprite.hunt_mission = false;
+			sprite.sleep_mission = false;
 		}
 	}
 }
@@ -2767,6 +3457,9 @@ function member_arrived(sprite: MapSprite): boolean {
 	const foot = sprite.foot;
 	if (!foot) {
 		return true;
+	}
+	if (foot.is_drop_pod) {
+		return false;
 	}
 	if (sprite.rtti === "aircraft") {
 		return !foot.dest && !foot.is_taking_off && !foot.is_landing && foot.height_agl <= 0 && foot.speed === 0;
@@ -2790,6 +3483,31 @@ function occupier_at(artwork: MapArtwork, cell: Point2D): MapSprite | null {
 		}
 	}
 	return found;
+}
+
+function cell_techno(artwork: MapArtwork, cell: Point2D, skip: MapSprite | null = null): MapSprite | null {
+	let found: MapSprite | null = null;
+	for (const sprite of artwork.sprites) {
+		if (sprite === skip || sprite.strength <= 0 || !sprite.rtti) {
+			continue;
+		}
+		if (sprite_occupies_cell(sprite, cell)) {
+			found = sprite;
+		}
+	}
+	return found;
+}
+
+function sprite_occupies_cell(sprite: MapSprite, cell: Point2D): boolean {
+	if (sprite.rtti === "building") {
+		return occupies(sprite, sprite.occupy, cell.x, cell.y);
+	}
+	const at = occupy_coord(sprite);
+	if (at) {
+		const here = Coord_Cell(at.x, at.y);
+		return here.x === cell.x && here.y === cell.y;
+	}
+	return sprite.x === cell.x && sprite.y === cell.y;
 }
 
 function assign_team_move(artwork: MapArtwork, team: TeamClass, cell: Point2D, play: Rect, cells: Set<string>): void {
@@ -2940,14 +3658,14 @@ function run_team_mission(
 		}
 		case TMISSION_WIN:
 			artwork.ended = "win";
-			artwork.message = "Mission accomplished";
-			artwork.message_timer = TICKS_PER_MINUTE;
+			Speak(VOX_ACCOMPLISHED);
+			Add_Message(artwork, "Mission accomplished", TICKS_PER_MINUTE);
 			team.IsNextMission = true;
 			break;
 		case TMISSION_LOSE:
 			artwork.ended = "lose";
-			artwork.message = "Mission failed";
-			artwork.message_timer = TICKS_PER_MINUTE;
+			Speak(VOX_FAIL);
+			Add_Message(artwork, "Mission failed", TICKS_PER_MINUTE);
 			team.IsNextMission = true;
 			break;
 		case TMISSION_GOTO_SHROUD:
@@ -2970,9 +3688,25 @@ function run_team_mission(
 		case TMISSION_PANIC:
 		case TMISSION_UNPANIC:
 		case TMISSION_FORCE_FACING:
-		case TMISSION_PLAY_SPEECH:
 			team.IsNextMission = true;
 			break;
+		case TMISSION_PLAY_SPEECH:
+			Speak(mission.Data);
+			team.IsNextMission = true;
+			break;
+		case TMISSION_PLAY_SOUND:
+			Sound_Effect(mission.Data);
+			team.IsNextMission = true;
+			break;
+		case TMISSION_CENTER_VIEWPOINT: {
+			const leader = playing_members(artwork, team)[0];
+			if (leader) {
+				artwork.center_on = { x: leader.x, y: leader.y };
+				artwork.center_speed = mission.Data;
+			}
+			team.IsNextMission = true;
+			break;
+		}
 		default:
 			team.IsNextMission = true;
 			break;
@@ -3270,26 +4004,32 @@ async function Place_Reinforcement(
 				riders.push(born);
 			}
 			if (drop_pod) {
-				const center = Cell_Center(drop_cell);
 				if (born.foot) {
-					born.foot.lx = center.x;
-					born.foot.ly = center.y;
+					DropPod_Move_To(
+						born.foot,
+						drop_cell,
+						artwork.production.drop_pod_height,
+						artwork.production.drop_pod_angle,
+						(x, y) => In_Radar_Cell(x, y, play),
+					);
 					const placed = Apply_Coord(born.foot);
 					born.x = placed.x;
 					born.y = placed.y;
 					born.ox = placed.ox;
 					born.oy = placed.oy;
-					const claimed = Closest_Free_Spot(artwork.sprites, born, drop_cell, center, artwork.sprites.length);
-					if (claimed) {
-						born.foot.lx = claimed.x;
-						born.foot.ly = claimed.y;
-						const spot = Apply_Coord(born.foot);
-						born.x = spot.x;
-						born.y = spot.y;
-						born.ox = spot.ox;
-						born.oy = spot.oy;
+					born.layer = 5;
+					born.dir = DropPod_Facing();
+					if (artwork.production.pod_file) {
+						born.file = artwork.production.pod_file;
+						born.frame = DropPod_Drawing_Code(born.foot);
 					}
-					Assign_Destination(born.foot, drop_cell);
+					spawn_map_anim(
+						artwork,
+						artwork.production.atmosphere_entry,
+						born.foot.lx,
+						born.foot.ly,
+						born.foot.height_agl,
+					);
 				}
 				artwork.sprites.push(born);
 				Look(artwork, born, shroud);
@@ -3306,6 +4046,7 @@ async function Place_Reinforcement(
 	if (drop_pod) {
 		Sort_Sprites(artwork);
 		team.Flag_Into_Action();
+		announce_reinforcements(type.House);
 		return;
 	}
 	if (transports.length > 0 && riders.length > 0) {
@@ -3346,6 +4087,13 @@ async function Place_Reinforcement(
 	}
 	Sort_Sprites(artwork);
 	team.Flag_Into_Action();
+	announce_reinforcements(type.House);
+}
+
+function announce_reinforcements(house: HouseClass | null): void {
+	if (house && PlayerPtr && house.Is_Ally(PlayerPtr)) {
+		Speak(VOX_REINFORCEMENTS);
+	}
 }
 
 function make_team_sprite(
@@ -3374,6 +4122,7 @@ function make_team_sprite(
 		foot: unit_foot(type, cell, 0),
 		voxel: type.voxel ? type.voxel_stem : "",
 		harvest: harvest_state(type, artwork.tiberiums.length),
+		hunt_mission: false,
 	});
 	return sprite;
 }
@@ -3384,6 +4133,13 @@ export function Factory_AI(artwork: MapArtwork): FactoryObject[] {
 		factory.AI(Available_Money(artwork), (cost) => {
 			Spend_Credits(artwork, cost);
 		});
+		if (factory.Has_Changed() && factory.Has_Completed() && factory.Object) {
+			if (factory.Object.kind === "BuildingType") {
+				Speak(VOX_CONSTRUCTION);
+			} else {
+				Speak(VOX_UNIT_READY);
+			}
+		}
 		if (factory.ExitingFoot && exit_radio_clear(artwork, factory)) {
 			factory.ExitingFoot = null;
 		}
@@ -3408,6 +4164,18 @@ export function Display_AI(artwork: MapArtwork): void {
 }
 
 function Primary_Weapon(artwork: MapArtwork, sprite: MapSprite): WeaponTypeClass | null {
+	if (sprite.rtti === "building") {
+		for (const name of sprite.upgrades) {
+			const upgrade = artwork.production.buildings.get(name.toUpperCase());
+			if (!upgrade?.primary) {
+				continue;
+			}
+			const weapon = artwork.weapons.get(upgrade.primary.toUpperCase());
+			if (weapon) {
+				return weapon;
+			}
+		}
+	}
 	const type = type_for_sprite(artwork, sprite);
 	if (!type?.primary) {
 		return null;
@@ -3503,6 +4271,12 @@ function Can_Fire(artwork: MapArtwork, sprite: MapSprite, target: MapSprite | nu
 	if (!sprite.ammo) {
 		return FIRE_AMMO;
 	}
+	if (sprite.rtti === "building" && Is_Turret_Equipped(artwork, sprite)) {
+		const towards = Dir256_Toward(Center_Coord(artwork, sprite), Center_Coord(artwork, target));
+		if (!Is_Complete_Turn(sprite.dir, towards, DIR_STEP_32)) {
+			return FIRE_FACING;
+		}
+	}
 	return FIRE_OK;
 }
 
@@ -3538,15 +4312,15 @@ export function Assign_Target(sprite: MapSprite, target: MapSprite | null, chase
 }
 
 function Target_Something_Nearby(artwork: MapArtwork, sprite: MapSprite): void {
-	if (sprite.tarcom && !sprite.attack_mission && !In_Range_Of(artwork, sprite, sprite.tarcom)) {
+	if (sprite.tarcom && !sprite.attack_mission && !sprite.hunt_mission && !In_Range_Of(artwork, sprite, sprite.tarcom)) {
 		Assign_Target(sprite, null);
 	}
 	if (!sprite.tarcom) {
-		Assign_Target(sprite, Greatest_Threat(artwork, sprite));
+		Assign_Target(sprite, Greatest_Threat(artwork, sprite, sprite.hunt_mission));
 	}
 }
 
-function Greatest_Threat(artwork: MapArtwork, sprite: MapSprite): MapSprite | null {
+function Greatest_Threat(artwork: MapArtwork, sprite: MapSprite, hunt = false): MapSprite | null {
 	const weapon = Primary_Weapon(artwork, sprite);
 	if (!weapon) {
 		return null;
@@ -3555,7 +4329,7 @@ function Greatest_Threat(artwork: MapArtwork, sprite: MapSprite): MapSprite | nu
 	let best_dist = Number.POSITIVE_INFINITY;
 	const from = Center_Coord(artwork, sprite);
 	for (const other of artwork.sprites) {
-		if (other === sprite || other.strength <= 0) {
+		if (other === sprite || other.strength <= 0 || other.is_dying) {
 			continue;
 		}
 		if (other.rtti !== "building" && other.rtti !== "infantry" && other.rtti !== "unit" && other.rtti !== "aircraft") {
@@ -3568,7 +4342,7 @@ function Greatest_Threat(artwork: MapArtwork, sprite: MapSprite): MapSprite | nu
 		if (Is_Ally_Sprite(sprite, other)) {
 			continue;
 		}
-		if (!In_Range_Of(artwork, sprite, other)) {
+		if (!hunt && !In_Range_Of(artwork, sprite, other)) {
 			continue;
 		}
 		const dist = Math.hypot(from.x - Center_Coord(artwork, other).x, from.y - Center_Coord(artwork, other).y);
@@ -3580,27 +4354,185 @@ function Greatest_Threat(artwork: MapArtwork, sprite: MapSprite): MapSprite | nu
 	return best;
 }
 
+function Stop_Driver(sprite: MapSprite): void {
+	if (sprite.foot) {
+		Assign_Destination(sprite.foot, null);
+	}
+}
+
+const DIR_STEP_32 = 8;
+
+function Is_Turret_Equipped(artwork: MapArtwork, sprite: MapSprite): boolean {
+	const type = type_for_sprite(artwork, sprite);
+	if (type?.turret) {
+		return true;
+	}
+	for (const name of sprite.upgrades) {
+		if (artwork.production.buildings.get(name.toUpperCase())?.turret) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function Is_Complete_Turn(current: number, towards: number, by: number): boolean {
+	const diff = (((current & 255) << 8) - ((towards & 255) << 8)) << 16 >> 16;
+	return Math.abs(by) >= Math.abs(diff);
+}
+
+function turn_dir256(current: number, desired: number, rot: number): number {
+	if (rot <= 0) {
+		return desired & 255;
+	}
+	let delta = (desired - current) & 255;
+	if (delta > 128) {
+		delta -= 256;
+	}
+	if (Math.abs(delta) <= rot) {
+		return desired & 255;
+	}
+	return (current + (delta > 0 ? rot : -rot)) & 255;
+}
+
+function apply_turret_overlay(artwork: MapArtwork, sprite: MapSprite): void {
+	if (sprite.rtti !== "building" || sprite.upgrades.length === 0) {
+		return;
+	}
+	for (const other of artwork.sprites) {
+		if (other === sprite || other.x !== sprite.x || other.y !== sprite.y) {
+			continue;
+		}
+		if (!sprite.upgrades.includes(other.type_name.toUpperCase())) {
+			continue;
+		}
+		other.dir = sprite.dir;
+		const upgrade = artwork.production.buildings.get(other.type_name.toUpperCase());
+		if (upgrade && !upgrade.voxel) {
+			other.frame = powerup_frame(upgrade, other.dir);
+		}
+	}
+}
+
+function Face_Target(artwork: MapArtwork, sprite: MapSprite, target: MapSprite): void {
+	sprite.dir = Dir256_Toward(Center_Coord(artwork, sprite), Center_Coord(artwork, target));
+	apply_turret_overlay(artwork, sprite);
+}
+
+function Aim_Turret(artwork: MapArtwork, sprite: MapSprite, target: MapSprite): void {
+	const desired = Dir256_Toward(Center_Coord(artwork, sprite), Center_Coord(artwork, target));
+	if (sprite.rtti === "building" && Is_Turret_Equipped(artwork, sprite)) {
+		const type = type_for_sprite(artwork, sprite);
+		sprite.dir = turn_dir256(sprite.dir, desired, type?.rot ?? 0);
+		apply_turret_overlay(artwork, sprite);
+		return;
+	}
+	Face_Target(artwork, sprite, target);
+}
+
+function Do_Action(sprite: MapSprite, type: ShapeType, todo: number): boolean {
+	const info = type.do_controls[todo];
+	if (!info || info.count <= 0) {
+		return false;
+	}
+	sprite.doing = todo;
+	sprite.do_stage = 0;
+	sprite.do_rate = MASTER_DO_RATE[todo] ?? 1;
+	sprite.do_timer = sprite.do_rate;
+	if (sprite.strength <= 0) {
+		Stop_Driver(sprite);
+	}
+	return true;
+}
+
+function Stage_Logic(sprite: MapSprite): void {
+	if (sprite.do_rate === 0) {
+		return;
+	}
+	if (sprite.do_timer > 0) {
+		sprite.do_timer -= 1;
+	}
+	if (sprite.do_timer === 0) {
+		sprite.do_stage += 1;
+		sprite.do_timer = sprite.do_rate;
+	}
+}
+
+function spawn_warhead_anim(artwork: MapArtwork, damage: number, warhead: WarheadTypeClass | null, lx: number, ly: number): void {
+	const name = Combat_Anim(damage, warhead);
+	if (name) {
+		spawn_map_anim(artwork, name, lx, ly, 0);
+	}
+}
+
+function Firing_Cell(
+	artwork: MapArtwork,
+	sprite: MapSprite,
+	target: MapSprite,
+	play: Rect,
+	cells: Set<string>,
+): Point2D | null {
+	const weapon = Primary_Weapon(artwork, sprite);
+	if (!weapon) {
+		return null;
+	}
+	const span = Building_Span(artwork, target);
+	const to = Center_Coord(artwork, target);
+	const from = { x: sprite.x, y: sprite.y };
+	const radius = Math.max(1, Math.ceil(weapon.Range / CELL_LEPTON) + 1);
+	let best: Point2D | null = null;
+	let best_dist = Number.POSITIVE_INFINITY;
+	for (let dy = -radius; dy <= radius; dy++) {
+		for (let dx = -radius; dx <= radius; dx++) {
+			const cell = { x: target.x + dx, y: target.y + dy };
+			if (cell.x === from.x && cell.y === from.y) {
+				continue;
+			}
+			if (weapon.Range > CELL_LEPTON && cell.x === target.x && cell.y === target.y) {
+				continue;
+			}
+			if (!can_enter_foot(artwork, sprite, cell, play, cells, false)) {
+				continue;
+			}
+			if (!In_Range(Cell_Center(cell), to, weapon, span)) {
+				continue;
+			}
+			const dist = Math.abs(cell.x - from.x) + Math.abs(cell.y - from.y);
+			if (dist < best_dist) {
+				best = cell;
+				best_dist = dist;
+			}
+		}
+	}
+	return best;
+}
+
 function Approach_Target(artwork: MapArtwork, sprite: MapSprite, play: Rect, cells: Set<string>): void {
 	const target = sprite.tarcom;
-	if (!target) {
+	if (!target || sprite.is_dying) {
+		return;
+	}
+	if (sprite.rtti === "infantry" && sprite.is_firing) {
 		return;
 	}
 	if (In_Range_Of(artwork, sprite, target)) {
-		if (Can_Fire(artwork, sprite, target) === FIRE_OK) {
-			Fire_At(artwork, sprite, target);
+		if ((sprite.attack_mission || sprite.hunt_mission) && sprite.foot && (sprite.foot.dest || sprite.foot.head || sprite.foot.moving)) {
+			Stop_Driver(sprite);
 		}
 		return;
 	}
-	if (!sprite.attack_mission || !sprite.foot) {
+	if ((!sprite.attack_mission && !sprite.hunt_mission) || !sprite.foot) {
 		return;
 	}
-	let dest = { x: target.x, y: target.y };
-	if (!can_enter_foot(artwork, sprite, dest, play, cells, false, true)) {
-		const nearby = nearby_enter(artwork, sprite, dest, play, cells);
-		if (!nearby) {
-			return;
-		}
-		dest = nearby;
+	let dest = Firing_Cell(artwork, sprite, target, play, cells);
+	if (!dest) {
+		dest = nearby_enter(artwork, sprite, { x: target.x, y: target.y }, play, cells);
+	}
+	if (!dest) {
+		return;
+	}
+	if (dest.x === sprite.x && dest.y === sprite.y) {
+		Stop_Driver(sprite);
+		return;
 	}
 	if (sprite.foot.dest && sprite.foot.dest.x === dest.x && sprite.foot.dest.y === dest.y) {
 		return;
@@ -3620,8 +4552,12 @@ function Fire_At(artwork: MapArtwork, sprite: MapSprite, target: MapSprite): voi
 	}
 	const from = Center_Coord(artwork, sprite);
 	const to = Center_Coord(artwork, target);
+	if (weapon.Sound.length > 0) {
+		Sound_Effect_At(weapon.Sound[Math.floor(Math.random() * weapon.Sound.length)]!, from.x, from.y, sprite.foot?.height_agl ?? 0);
+	}
 	if (weapon.Bullet.IsInvisible) {
 		Take_Damage(artwork, target, damage, 0, weapon.WarheadPtr, sprite);
+		spawn_warhead_anim(artwork, damage, weapon.WarheadPtr, to.x, to.y);
 		return;
 	}
 	artwork.bullets.push({
@@ -3635,6 +4571,137 @@ function Fire_At(artwork: MapArtwork, sprite: MapSprite, target: MapSprite): voi
 		warhead: weapon.WarheadPtr,
 		payback: sprite,
 	});
+	if (sprite.rtti === "unit") {
+		const type = type_for_sprite(artwork, sprite);
+		if (type && type.firing_frames > 0 && sprite.firing_sync < 0) {
+			sprite.firing_sync = 2 * type.firing_frames - 1;
+		}
+	}
+}
+
+function Infantry_Firing_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType): void {
+	const target = sprite.tarcom;
+	if (!target || sprite.is_dying) {
+		sprite.is_firing = false;
+		return;
+	}
+	if (!sprite.is_firing) {
+		if (Can_Fire(artwork, sprite, target) !== FIRE_OK) {
+			return;
+		}
+		Face_Target(artwork, sprite, target);
+		Stop_Driver(sprite);
+		if (Do_Action(sprite, type, DO_FIRE_WEAPON)) {
+			sprite.is_firing = true;
+		} else {
+			Fire_At(artwork, sprite, target);
+		}
+	}
+	if (sprite.is_firing && sprite.do_stage === type.fire_launch) {
+		if (Can_Fire(artwork, sprite, target) === FIRE_OK) {
+			Fire_At(artwork, sprite, target);
+		} else {
+			sprite.is_firing = false;
+			Do_Action(sprite, type, DO_STAND_READY);
+		}
+	}
+}
+
+function Infantry_Doing_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType): void {
+	const info = type.do_controls[sprite.doing];
+	if (!info || sprite.do_stage < info.count) {
+		return;
+	}
+	if (sprite.doing === DO_GUN_DEATH || sprite.doing === DO_EXPLOSION_DEATH || sprite.doing === DO_FIRE_DEATH) {
+		const bodies = artwork.production.dead_bodies;
+		if (bodies.length > 0) {
+			spawn_map_anim(artwork, bodies[artwork.frame % bodies.length]!, sprite.foot?.lx ?? Cell_Center(sprite).x, sprite.foot?.ly ?? Cell_Center(sprite).y, 0);
+		}
+		Remove_Sprite(artwork, sprite);
+		return;
+	}
+	if (sprite.doing === DO_FIRE_WEAPON) {
+		sprite.is_firing = false;
+		Do_Action(sprite, type, DO_STAND_READY);
+	}
+}
+
+function Techno_Firing_AI(artwork: MapArtwork, sprite: MapSprite): void {
+	const target = sprite.tarcom;
+	if (!target || sprite.is_dying) {
+		return;
+	}
+	Aim_Turret(artwork, sprite, target);
+	if (Can_Fire(artwork, sprite, target) === FIRE_OK) {
+		Fire_At(artwork, sprite, target);
+	}
+}
+
+function Start_Death(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, warhead: WarheadTypeClass, _source: MapSprite | null): boolean {
+	Stop_Driver(sprite);
+	sprite.tarcom = null;
+	sprite.attack_mission = false;
+	sprite.hunt_mission = false;
+	sprite.sleep_mission = false;
+	sprite.is_firing = false;
+	sprite.is_selected = false;
+	sprite.selectable = false;
+	if (sprite.rtti === "infantry") {
+		let doing = -1;
+		switch (warhead.InfantryDeath) {
+			case 1:
+				doing = DO_GUN_DEATH;
+				break;
+			case 2:
+				doing = DO_EXPLOSION_DEATH;
+				break;
+			case 3:
+				if (artwork.production.infantry_explode) {
+					spawn_map_anim(
+						artwork,
+						artwork.production.infantry_explode,
+						sprite.foot?.lx ?? Cell_Center(sprite).x,
+						sprite.foot?.ly ?? Cell_Center(sprite).y,
+						0,
+					);
+				}
+				return false;
+			default:
+				spawn_warhead_anim(
+					artwork,
+					type.strength,
+					warhead,
+					sprite.foot?.lx ?? Cell_Center(sprite).x,
+					sprite.foot?.ly ?? Cell_Center(sprite).y,
+				);
+				return false;
+		}
+		if (Do_Action(sprite, type, doing)) {
+			sprite.is_dying = true;
+			return true;
+		}
+		spawn_warhead_anim(
+			artwork,
+			type.strength,
+			warhead,
+			sprite.foot?.lx ?? Cell_Center(sprite).x,
+			sprite.foot?.ly ?? Cell_Center(sprite).y,
+		);
+		return false;
+	}
+	if (sprite.rtti === "unit" && type.death_frames > 0 && !type.voxel) {
+		sprite.is_dying = true;
+		sprite.death_counter = 0;
+		return true;
+	}
+	spawn_warhead_anim(
+		artwork,
+		type.strength,
+		warhead,
+		sprite.foot?.lx ?? Cell_Center({ x: sprite.x, y: sprite.y }).x,
+		sprite.foot?.ly ?? Cell_Center({ x: sprite.x, y: sprite.y }).y,
+	);
+	return false;
 }
 
 function Take_Damage(
@@ -3646,7 +4713,7 @@ function Take_Damage(
 	_source: MapSprite | null,
 ): void {
 	const type = type_for_sprite(artwork, sprite);
-	if (!type || sprite.strength <= 0) {
+	if (!type || sprite.strength <= 0 || sprite.is_dying) {
 		return;
 	}
 	if (type.immune) {
@@ -3683,27 +4750,125 @@ function Take_Damage(
 			Remove_Sprite(artwork, extra);
 		}
 	}
+	if (Start_Death(artwork, sprite, type, warhead, _source)) {
+		return;
+	}
 	Remove_Sprite(artwork, sprite);
 }
 
+function Explosion_Damage(
+	artwork: MapArtwork,
+	coord: Point2D,
+	strength: number,
+	source: MapSprite | null,
+	warhead: WarheadTypeClass | null,
+): void {
+	if (!warhead || !strength) {
+		return;
+	}
+	const range = CELL_LEPTON + (CELL_LEPTON >> 1);
+	const cell = Coord_Cell(coord.x, coord.y);
+	const impacto = cell_techno(artwork, cell);
+	const seen = new Set<MapSprite>();
+	const objects: MapSprite[] = [];
+	const add = (at: Point2D): void => {
+		for (const sprite of artwork.sprites) {
+			if (sprite === source || seen.has(sprite) || sprite.strength <= 0 || !sprite.rtti) {
+				continue;
+			}
+			if (!sprite_occupies_cell(sprite, at)) {
+				continue;
+			}
+			seen.add(sprite);
+			objects.push(sprite);
+		}
+	};
+	add(cell);
+	for (let dir = 0; dir < 8; dir++) {
+		add(Adjacent_Cell(cell, dir));
+	}
+	for (const sprite of objects) {
+		if (sprite.strength <= 0) {
+			continue;
+		}
+		const type = type_for_sprite(artwork, sprite);
+		if (type?.invisible) {
+			continue;
+		}
+		let distance: number;
+		if (sprite.rtti === "building" && impacto === sprite) {
+			distance = 0;
+		} else {
+			const center = Center_Coord(artwork, sprite);
+			distance = Math.hypot(coord.x - center.x, coord.y - center.y);
+			if (sprite.rtti === "aircraft") {
+				distance /= 2;
+			}
+		}
+		if (distance < range) {
+			Take_Damage(artwork, sprite, strength, Math.trunc(distance), warhead, source);
+		}
+	}
+}
+
 export function Object_AI(artwork: MapArtwork, sprite: MapSprite, play: Rect, cells: Set<string>): void {
-	if (!sprite.rtti || sprite.strength <= 0) {
+	if (!sprite.rtti) {
+		return;
+	}
+	const type = type_for_sprite(artwork, sprite);
+	if (sprite.is_dying) {
+		Stage_Logic(sprite);
+		if (sprite.rtti === "infantry" && type) {
+			sprite.frame = infantry_do_frame(type, sprite.doing, sprite.do_stage, sprite.dir);
+			Infantry_Doing_AI(artwork, sprite, type);
+			return;
+		}
+		if (sprite.rtti === "unit" && type && sprite.death_counter >= 0) {
+			sprite.death_counter += 1;
+			if (!type.voxel) {
+				sprite.frame = unit_death_frame(type, sprite.death_counter);
+			}
+			if (sprite.death_counter >= type.death_frames * type.death_frame_rate) {
+				Remove_Sprite(artwork, sprite);
+			}
+			return;
+		}
+		return;
+	}
+	if (sprite.strength <= 0) {
 		return;
 	}
 	if (sprite.arm > 0) {
 		sprite.arm -= 1;
 	}
-	if (sprite.tarcom && (sprite.tarcom.strength <= 0 || !artwork.sprites.includes(sprite.tarcom))) {
+	if (sprite.firing_sync >= 0) {
+		sprite.firing_sync -= 1;
+	}
+	if (sprite.tarcom && (sprite.tarcom.strength <= 0 || sprite.tarcom.is_dying || !artwork.sprites.includes(sprite.tarcom))) {
 		Assign_Target(sprite, null);
 	}
-	const type = type_for_sprite(artwork, sprite);
 	if (type?.harvester && sprite.harvest) {
 		Harvest_AI(artwork, sprite, type, play, cells);
 		return;
 	}
-	Target_Something_Nearby(artwork, sprite);
-	if (sprite.tarcom) {
-		Approach_Target(artwork, sprite, play, cells);
+	Stage_Logic(sprite);
+	if (!sprite.sleep_mission || sprite.team || sprite.attack_mission || sprite.hunt_mission) {
+		Target_Something_Nearby(artwork, sprite);
+		if (sprite.tarcom) {
+			Approach_Target(artwork, sprite, play, cells);
+			if (sprite.rtti === "infantry" && type) {
+				Infantry_Firing_AI(artwork, sprite, type);
+				Infantry_Doing_AI(artwork, sprite, type);
+				if (sprite.is_firing) {
+					sprite.frame = infantry_do_frame(type, sprite.doing, sprite.do_stage, sprite.dir);
+				}
+			} else {
+				Techno_Firing_AI(artwork, sprite);
+			}
+		} else if (sprite.is_firing && type) {
+			sprite.is_firing = false;
+			Do_Action(sprite, type, DO_STAND_READY);
+		}
 	}
 }
 
@@ -3723,6 +4888,7 @@ export function Bullet_AI(artwork: MapArtwork): void {
 			if (bullet.target && bullet.target.strength > 0 && artwork.sprites.includes(bullet.target)) {
 				Take_Damage(artwork, bullet.target, bullet.damage, 0, bullet.warhead, bullet.payback);
 			}
+			spawn_warhead_anim(artwork, bullet.damage, bullet.warhead, bullet.tx, bullet.ty);
 			continue;
 		}
 		bullet.lx += (dx / dist) * step;
@@ -3737,8 +4903,28 @@ export function House_AI(artwork: MapArtwork): void {
 		if (house.RecalcPower && house === PlayerPtr) {
 			Recalc_Power(artwork);
 		}
+		if (house.IsAllToHunt) {
+			All_To_Hunt(artwork, house);
+			house.IsAllToHunt = false;
+		}
 		house.AI();
 		Spring_House_Tags(artwork, artwork.shroud_map, house);
+	}
+}
+
+function All_To_Hunt(artwork: MapArtwork, house: HouseClass): void {
+	for (const sprite of artwork.sprites) {
+		if (!sprite.foot || sprite.house !== house.HeapID) {
+			continue;
+		}
+		if (sprite.rtti !== "infantry" && sprite.rtti !== "unit" && sprite.rtti !== "aircraft") {
+			continue;
+		}
+		if (sprite.team) {
+			sprite.team.Remove(sprite);
+		}
+		sprite.hunt_mission = true;
+		sprite.sleep_mission = false;
 	}
 }
 
@@ -3892,12 +5078,12 @@ function House_Harvested(artwork: MapArtwork, house: number, amount: number, slo
 	}
 }
 
-function foot_idle(sprite: MapSprite): boolean {
+function harvest_nav_busy(sprite: MapSprite): boolean {
 	const foot = sprite.foot;
 	if (!foot) {
-		return true;
+		return false;
 	}
-	return !foot.dest && !foot.moving && !foot.head && !foot.is_driving && foot.rotation_timer <= 0;
+	return foot.dest !== null || foot.head !== null || foot.is_driving;
 }
 
 function tiberium_at(artwork: MapArtwork, cell: Point2D): MapSprite | null {
@@ -3977,31 +5163,45 @@ function Find_Docking_Bay(artwork: MapArtwork, harvester: MapSprite, type: Shape
 			if (building.type_name.toUpperCase() !== key) {
 				continue;
 			}
-			const dist = Math.abs(building.x - harvester.x) + Math.abs(building.y - harvester.y);
 			const dock_type = type_for_sprite(artwork, building);
-			if (dock_type?.leader) {
-				return building;
+			if (!dock_type || (!dock_type.refinery && !dock_type.dock_unload)) {
+				continue;
 			}
+			if (docking_busy(artwork, building, harvester)) {
+				continue;
+			}
+			const dist = Math.abs(building.x - harvester.x) + Math.abs(building.y - harvester.y);
 			if (dist < best_dist) {
 				best_dist = dist;
 				best = building;
 			}
 		}
-		if (best) {
-			return best;
-		}
 	}
 	return best;
 }
 
-function dock_cell(artwork: MapArtwork, building: MapSprite, harvester: MapSprite, play: Rect, cells: Set<string>): Point2D {
-	const type = type_for_sprite(artwork, building);
-	const center = type ? occupy_center(building, type.occupy) : { x: building.x, y: building.y };
-	const prefer = { x: center.x + 1, y: center.y };
-	if (Can_Move_To(artwork, harvester, prefer, play, cells)) {
-		return prefer;
+function docking_busy(artwork: MapArtwork, bay: MapSprite, except: MapSprite): boolean {
+	return artwork.sprites.some((sprite) => {
+		if (sprite === except || !sprite.harvest || sprite.harvest.dock !== bay) {
+			return false;
+		}
+		return sprite.harvest.status === HARVEST_FINDHOME || sprite.harvest.status === HARVEST_DUMPING;
+	});
+}
+
+function harvest_dock_cell(building: MapSprite): Point2D {
+	return { x: building.x + 2, y: building.y + 1 };
+}
+
+function harvest_may_enter_dock(artwork: MapArtwork, mover: MapSprite, building: MapSprite, cell: Point2D): boolean {
+	if (!mover.harvest || mover.harvest.dock !== building || building.house !== mover.house || building.strength <= 0) {
+		return false;
 	}
-	return nearby_enter(artwork, harvester, prefer, play, cells) ?? nearby_enter(artwork, harvester, center, play, cells) ?? prefer;
+	const dock_type = type_for_sprite(artwork, building);
+	if (!dock_type || (!dock_type.refinery && !dock_type.dock_unload)) {
+		return false;
+	}
+	return cell.x === building.x + 2 && cell.y === building.y + 1;
 }
 
 function Harvest_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, play: Rect, cells: Set<string>): void {
@@ -4009,34 +5209,47 @@ function Harvest_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, pla
 		return;
 	}
 	const state = sprite.harvest;
+	const foot = sprite.foot;
 	if (state.storage.length < artwork.tiberiums.length) {
 		state.storage = empty_storage(artwork.tiberiums.length);
 	}
+	if (state.dock && (state.dock.strength <= 0 || !artwork.sprites.includes(state.dock))) {
+		state.dock = null;
+		if (state.status === HARVEST_DUMPING) {
+			state.status = HARVEST_FINDHOME;
+		}
+	}
 	const load = storage_total(state.storage);
 	const full = type.capacity > 0 && load >= type.capacity;
+	const here = { x: sprite.x, y: sprite.y };
 	switch (state.status) {
 		case HARVEST_LOOKING:
 			if (full) {
 				state.status = HARVEST_FINDHOME;
 				break;
 			}
-			if (!foot_idle(sprite)) {
+			if (harvest_nav_busy(sprite)) {
+				break;
+			}
+			if (state.archive) {
+				Assign_Destination(foot, state.archive);
+				state.archive = null;
 				break;
 			}
 			{
-				const cell = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_long_scan, play, cells, sprite);
-				if (cell && cell.x === sprite.x && cell.y === sprite.y) {
+				const cell = Search_For_Tiberium(artwork, here, artwork.tiberium_long_scan, play, cells, sprite);
+				if (cell && cell.x === here.x && cell.y === here.y) {
 					state.status = HARVEST_HARVESTING;
 					state.stage = 0;
 				} else if (cell) {
-					Assign_Destination(sprite.foot, cell);
+					Assign_Destination(foot, cell);
 				} else if (load > 0) {
 					state.status = HARVEST_FINDHOME;
 				}
 			}
 			break;
 		case HARVEST_HARVESTING:
-			if (!foot_idle(sprite)) {
+			if (harvest_nav_busy(sprite)) {
 				break;
 			}
 			state.stage += 1;
@@ -4044,59 +5257,70 @@ function Harvest_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, pla
 				break;
 			}
 			state.stage = 0;
-			if (full || !tiberium_at(artwork, { x: sprite.x, y: sprite.y })) {
-				if (full) {
-					const nearby = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_short_scan, play, cells, sprite);
-					state.archive = nearby;
-					state.status = HARVEST_FINDHOME;
-				} else {
-					const next = Search_For_Tiberium(artwork, { x: sprite.x, y: sprite.y }, artwork.tiberium_short_scan, play, cells, sprite);
-					if (next && (next.x !== sprite.x || next.y !== sprite.y)) {
-						Assign_Destination(sprite.foot, next);
-					} else if (load > 0) {
-						state.status = HARVEST_FINDHOME;
-					} else {
-						state.status = HARVEST_LOOKING;
+			{
+				const overlay = tiberium_at(artwork, here);
+				const room = Math.max(0, type.capacity - load);
+				let lifted = false;
+				if (!full && overlay && room > 0) {
+					const slot = overlay.tib >= 0 ? overlay.tib : 0;
+					const took = Reduce_Tiberium(artwork, here, Math.min(1, room));
+					if (took > 0) {
+						state.storage[slot] = (state.storage[slot] ?? 0) + took;
+						lifted = true;
 					}
 				}
-				break;
-			}
-			{
-				const overlay = tiberium_at(artwork, { x: sprite.x, y: sprite.y });
-				const slot = overlay && overlay.tib >= 0 ? overlay.tib : 0;
-				const room = Math.max(0, type.capacity - load);
-				const took = Reduce_Tiberium(artwork, { x: sprite.x, y: sprite.y }, Math.min(1, room));
-				if (took > 0) {
-					state.storage[slot] = (state.storage[slot] ?? 0) + took;
-				} else {
-					state.status = HARVEST_LOOKING;
+				if (lifted) {
+					break;
 				}
+				const filled = type.capacity > 0 && storage_total(state.storage) >= type.capacity;
+				if (filled) {
+					state.archive = Search_For_Tiberium(artwork, here, artwork.tiberium_short_scan, play, cells, sprite);
+					state.status = HARVEST_FINDHOME;
+					break;
+				}
+				const next = Search_For_Tiberium(artwork, here, artwork.tiberium_short_scan, play, cells, sprite);
+				if (next && (next.x !== here.x || next.y !== here.y)) {
+					Assign_Destination(foot, next);
+					break;
+				}
+				state.archive = null;
+				state.status = HARVEST_FINDHOME;
 			}
 			break;
 		case HARVEST_FINDHOME:
-			if (!foot_idle(sprite)) {
+			if (harvest_nav_busy(sprite)) {
 				break;
 			}
 			{
-				const bay = Find_Docking_Bay(artwork, sprite, type);
+				const bay = state.dock && state.dock.strength > 0 ? state.dock : Find_Docking_Bay(artwork, sprite, type);
 				if (!bay) {
-					state.status = HARVEST_LOOKING;
 					break;
 				}
 				state.dock = bay;
-				const dest = dock_cell(artwork, bay, sprite, play, cells);
-				if (dest.x === sprite.x && dest.y === sprite.y) {
+				const dest = harvest_dock_cell(bay);
+				if (dest.x === here.x && dest.y === here.y) {
+					Stop_Driver(sprite);
 					state.status = HARVEST_DUMPING;
 					state.stage = 0;
+					const east = Facing_Dir256(2);
+					sprite.dir = east;
+					Set_Drive_Facing(foot, east);
 				} else {
-					Assign_Destination(sprite.foot, dest);
+					Assign_Destination(foot, dest);
 				}
 			}
 			break;
 		case HARVEST_DUMPING:
-			if (!foot_idle(sprite)) {
+			if (harvest_nav_busy(sprite)) {
 				state.status = HARVEST_FINDHOME;
 				break;
+			}
+			{
+				const east = Facing_Dir256(2);
+				if (sprite.dir !== east) {
+					sprite.dir = east;
+					Set_Drive_Facing(foot, east);
+				}
 			}
 			state.stage += 1;
 			if (state.stage < artwork.harvester_dump_rate) {
@@ -4114,7 +5338,7 @@ function Harvest_AI(artwork: MapArtwork, sprite: MapSprite, type: ShapeType, pla
 				if (slot < 0) {
 					state.dock = null;
 					if (state.archive) {
-						Assign_Destination(sprite.foot, state.archive);
+						Assign_Destination(foot, state.archive);
 						state.archive = null;
 					}
 					state.status = HARVEST_LOOKING;
@@ -4455,7 +5679,7 @@ export function Follow_Waypoint(
 ): boolean {
 	const waypoint = Waypoint_At(artwork.paths, cell);
 	const data = Fetch_Waypoint_Data(artwork.paths, waypoint);
-	if (!waypoint || !data || !sprite.foot) {
+	if (!waypoint || !data || !Can_Player_Move(sprite)) {
 		return false;
 	}
 	artwork.selected_path = data.path;
@@ -4708,6 +5932,7 @@ function Sell_Wall(artwork: MapArtwork, cell: Point2D): void {
 }
 
 function Remove_Sprite(artwork: MapArtwork, sprite: MapSprite): void {
+	Detach_Building_Light(artwork, sprite);
 	const index = artwork.sprites.indexOf(sprite);
 	if (index < 0) {
 		return;
@@ -4809,9 +6034,23 @@ function powered_factory_names(artwork: MapArtwork): string[] {
 	return names;
 }
 
+function Recalc_Overlay_Land(artwork: MapArtwork): void {
+	for (const sprite of artwork.sprites) {
+		if (sprite.overlay_land < 0) {
+			continue;
+		}
+		const cell = artwork.terrain.get(`${sprite.x},${sprite.y}`);
+		if (cell) {
+			cell.land = sprite.overlay_land;
+		}
+	}
+}
+
 export function Bind_Path_Graph(artwork: MapArtwork, cells: Set<string>): void {
+	Recalc_Overlay_Land(artwork);
 	const walls = new Set<string>();
 	const bridges: Point2D[] = [];
+	const high: HighBridgeMark[] = [];
 	const threat = new Map<number, number>();
 	for (const sprite of artwork.sprites) {
 		if (sprite.wall) {
@@ -4819,6 +6058,9 @@ export function Bind_Path_Graph(artwork: MapArtwork, cells: Set<string>): void {
 		}
 		if (sprite.bridge) {
 			bridges.push({ x: sprite.x, y: sprite.y });
+		}
+		if (sprite.bridge_facing >= 0) {
+			high.push({ x: sprite.x, y: sprite.y, facing: sprite.bridge_facing });
 		}
 		if (sprite.owned || (sprite.rtti !== "building" && sprite.rtti !== "infantry" && sprite.rtti !== "unit")) {
 			continue;
@@ -4838,6 +6080,9 @@ export function Bind_Path_Graph(artwork: MapArtwork, cells: Set<string>): void {
 		artwork.tubes,
 		bridges,
 		threat,
+		high,
+		artwork.bridge_set,
+		artwork.train_bridge_set,
 	);
 }
 
@@ -4880,6 +6125,7 @@ export async function Cameo_Left(
 	if (factory?.IsExiting || factory?.ExitingFoot) {
 		return;
 	}
+	Menu_Click_Sound();
 	if (factory && !factory.Is_Building()) {
 		if (factory.Has_Completed()) {
 			if (entry.BuildableType === "BuildingType") {
@@ -4894,6 +6140,7 @@ export async function Cameo_Left(
 	}
 	const existing = artwork.production.factories.get(entry.BuildableType);
 	if (existing && (existing.Is_Building() || existing.Has_Production_Target()) && entry.BuildableType === "BuildingType") {
+		Speak(VOX_NO_FACTORY);
 		return;
 	}
 	Begin_Production(artwork, entry);
@@ -4904,18 +6151,114 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 	const departed: MapSprite[] = [];
 	for (const sprite of artwork.sprites) {
 		const foot = sprite.foot;
-		if (!foot) {
+		if (!foot || !sprite.rtti) {
 			continue;
 		}
 		const type = type_for_sprite(artwork, sprite);
+		if (sprite.is_dying || (sprite.rtti === "infantry" && sprite.is_firing)) {
+			continue;
+		}
 		const before = Coord_Cell(foot.lx, foot.ly);
+		if (foot.is_drop_pod) {
+			const falling = DropPod_AI(foot, artwork.production.drop_pod_speed, artwork.production.drop_pod_angle);
+			const placed = Apply_Coord(foot);
+			sprite.x = placed.x;
+			sprite.y = placed.y;
+			sprite.ox = placed.ox;
+			sprite.oy = placed.oy;
+			if (falling === "falling") {
+				sprite.layer = 5;
+				sprite.dir = DropPod_Facing();
+				if (artwork.production.pod_file) {
+					sprite.file = artwork.production.pod_file;
+					sprite.frame = DropPod_Drawing_Code(foot);
+				}
+				const weapon_name = artwork.production.drop_pod_weapon;
+				if (weapon_name) {
+					if (artwork.frame % 6 === 0) {
+						spawn_map_anim(artwork, "SMOKEY", foot.lx, foot.ly, foot.height_agl);
+					}
+					if (artwork.frame % 3 === 0) {
+						const dest = foot.drop_pod_dest;
+						const house = Houses[sprite.house];
+						const occupant = dest ? cell_techno(artwork, Coord_Cell(dest.x, dest.y), sprite) : null;
+						if (dest && house && !house.Is_Ally(occupant ? (Houses[occupant.house] ?? null) : null)) {
+							const scattered = Coord_Scatter(dest, CELL_LEPTON / 3);
+							const weapon = artwork.weapons.get(weapon_name.toUpperCase());
+							const warhead = weapon?.WarheadPtr ?? null;
+							if (weapon && warhead) {
+								const strength = 2 * weapon.Attack;
+								Explosion_Damage(artwork, scattered, strength, sprite, warhead);
+								const anim = Combat_Anim(strength, warhead);
+								if (anim) {
+									spawn_map_anim(artwork, anim, scattered.x, scattered.y, 0);
+								}
+							}
+						}
+					}
+				}
+				if (placed.x !== before.x || placed.y !== before.y) {
+					resorted = true;
+				}
+				continue;
+			}
+			sprite.layer = 2;
+			if (sprite.healthy_file) {
+				sprite.file = sprite.healthy_file;
+			}
+			if (type) {
+				sprite.frame = infantry_ready_frame(type, sprite.dir);
+			}
+			const here = Coord_Cell(foot.lx, foot.ly);
+			let claimed: Point2D | null = null;
+			if (!building_at(artwork, here.x, here.y)) {
+				claimed = Closest_Free_Spot(artwork.sprites, sprite, here, { x: foot.lx, y: foot.ly }, artwork.frame);
+			}
+			if (!claimed) {
+				const warhead = artwork.warheads.get(artwork.production.c4_warhead.toUpperCase()) ?? null;
+				if (warhead) {
+					Explosion_Damage(artwork, { x: foot.lx, y: foot.ly }, 100, sprite, warhead);
+					const anim = Combat_Anim(100, warhead);
+					if (anim) {
+						spawn_map_anim(artwork, anim, foot.lx, foot.ly, 0);
+					}
+				}
+				departed.push(sprite);
+				continue;
+			}
+			const landings = artwork.production.drop_pod_anims;
+			if (landings.length > 0) {
+				spawn_map_anim(artwork, landings[foot.drop_pod_dir % landings.length]!, foot.lx, foot.ly, 0, 4);
+			}
+			foot.lx = claimed.x;
+			foot.ly = claimed.y;
+			const spot = Apply_Coord(foot);
+			sprite.x = spot.x;
+			sprite.y = spot.y;
+			sprite.ox = spot.ox;
+			sprite.oy = spot.oy;
+			if (!foot.dest) {
+				const nearby = nearby_enter(artwork, sprite, { x: sprite.x, y: sprite.y }, play, cells);
+				if (nearby) {
+					Assign_Destination(foot, nearby);
+				}
+			}
+			Look(artwork, sprite, shroud);
+			enter_cell(artwork, shroud, sprite, { x: sprite.x, y: sprite.y });
+			resorted = true;
+			continue;
+		}
 		if (sprite.rtti === "aircraft") {
 			const cruise = type && type.flight_level >= 0 ? type.flight_level : artwork.production.flight_level;
+			const was_taking_off = foot.is_taking_off;
 			const moved = Fly_AI(foot, {
 				cruise,
 				dropship: type?.is_dropship ?? false,
 				slowdown: type?.slowdown_distance ?? 500,
 			});
+			if (type) {
+				Play_Aircraft_Aux_Sounds(artwork, sprite, type, was_taking_off);
+			}
 			const cell = Coord_Cell(foot.lx, foot.ly);
 			if (!In_Radar_Cell(cell.x, cell.y, play) && sprite.loaner && !sprite.team) {
 				foot.left_map = true;
@@ -4932,8 +6275,9 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			sprite.ox = placed.ox;
 			sprite.oy = placed.oy;
 			sprite.dir = Body_Dir256(foot);
+			Advance_Walked(artwork, sprite, type);
 			if (type && !sprite.voxel) {
-				sprite.frame = unit_stand_frame(type, sprite.dir);
+				sprite.frame = unit_body_frame(type, sprite);
 			}
 			if (placed.x !== before.x || placed.y !== before.y) {
 				resorted = true;
@@ -4962,8 +6306,11 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 					scatter_idle(artwork, sprite, foot.dest, play, cells);
 				}
 			}
+			Advance_Walked(artwork, sprite, type);
 			if (type && sprite.rtti === "infantry" && !foot.moving) {
 				sprite.frame = infantry_ready_frame(type, sprite.dir);
+			} else if (type && sprite.rtti === "unit" && !type.voxel && !sprite.voxel) {
+				sprite.frame = unit_body_frame(type, sprite);
 			}
 			Resume_Waypoint(artwork, sprite, play, cells);
 			continue;
@@ -4979,13 +6326,14 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 			const facing = Direction_Facing({ x: foot.lx, y: foot.ly }, foot.head);
 			sprite.dir = Facing_Dir256(facing);
 		}
+		Advance_Walked(artwork, sprite, type);
 		if (type) {
 			if (sprite.rtti === "infantry") {
 				sprite.frame = foot.moving
 					? infantry_walk_frame(type, sprite.dir, foot.stage)
 					: infantry_ready_frame(type, sprite.dir);
 			} else if (!sprite.voxel) {
-				sprite.frame = unit_stand_frame(type, sprite.dir);
+				sprite.frame = unit_body_frame(type, sprite);
 			}
 		}
 		if (placed.x !== before.x || placed.y !== before.y) {
@@ -5010,6 +6358,14 @@ export function Foot_AI(artwork: MapArtwork, play: Rect, cells: Set<string>, shr
 	}
 }
 
+export function Can_Player_Move(sprite: MapSprite): boolean {
+	if (!sprite.owned || !sprite.foot) {
+		return false;
+	}
+	const house = Houses[sprite.house];
+	return house?.Is_Player_Control() === true;
+}
+
 export function Assign_Move(
 	artwork: MapArtwork,
 	sprite: MapSprite,
@@ -5018,9 +6374,11 @@ export function Assign_Move(
 	cells: Set<string>,
 	follow = false,
 ): boolean {
-	if (!sprite.foot) {
+	if (!sprite.foot || !Can_Player_Move(sprite)) {
 		return false;
 	}
+	Assign_Target(sprite, null);
+	sprite.is_firing = false;
 	if (!follow) {
 		Clear_Waypoint_Path(sprite.foot);
 	}
@@ -5046,7 +6404,7 @@ export function Assign_Move(
 }
 
 export function Assign_Group_Move(artwork: MapArtwork, cell: Point2D, play: Rect, cells: Set<string>): void {
-	const selected = artwork.current_object.filter((sprite) => sprite.foot);
+	const selected = artwork.current_object.filter((sprite) => Can_Player_Move(sprite));
 	const flyers = selected.filter((sprite) => sprite.rtti === "aircraft");
 	const movers = selected.filter((sprite) => sprite.rtti !== "aircraft");
 	for (const sprite of flyers) {
@@ -5621,7 +6979,7 @@ function cell_clear_for(
 	if (!In_Radar_Cell(cell.x, cell.y, play) || !cells.has(`${cell.x},${cell.y}`)) {
 		return false;
 	}
-	if (is_cliff_back(artwork, cell) || building_at(artwork, cell.x, cell.y)) {
+	if (cliff_blocks(artwork, cell) || building_at(artwork, cell.x, cell.y)) {
 		return false;
 	}
 	const occ = occupy_bits(artwork.sprites, null, cell);
@@ -5693,10 +7051,13 @@ function can_enter_foot(
 	if (!In_Radar_Cell(cell.x, cell.y, play) || !cells.has(`${cell.x},${cell.y}`)) {
 		return false;
 	}
-	if (is_cliff_back(artwork, cell)) {
+	if (cliff_blocks(artwork, cell)) {
 		return false;
 	}
 	if (!skip_occupy && !occupy_enter_ok(artwork.sprites, mover, cell)) {
+		return false;
+	}
+	if (!ground_cell_ok(artwork, mover, cell)) {
 		return false;
 	}
 	return !artwork.sprites.some((sprite) => {
@@ -5707,6 +7068,9 @@ function can_enter_foot(
 			return true;
 		}
 		if (sprite.rtti !== "building" || !occupies(sprite, sprite.occupy, cell.x, cell.y)) {
+			return false;
+		}
+		if (harvest_may_enter_dock(artwork, mover, sprite, cell)) {
 			return false;
 		}
 		if (sprite.gate) {
@@ -5742,6 +7106,15 @@ function is_cliff_back(artwork: MapArtwork, cell: Point2D): boolean {
 	return CLIFF_BACK_OFFSETS.some(([dx, dy]) => limit <= cell_height(artwork, cell.x + dx, cell.y + dy));
 }
 
+function deck_cell(artwork: MapArtwork, cell: Point2D): boolean {
+	const marked = artwork.path_graph ? graph_cell(artwork.path_graph, cell) : null;
+	return !!marked?.under_bridge && marked.bridge_traversable;
+}
+
+function cliff_blocks(artwork: MapArtwork, cell: Point2D): boolean {
+	return is_cliff_back(artwork, cell) && !deck_cell(artwork, cell);
+}
+
 function foot_step(
 	artwork: MapArtwork,
 	mover: MapSprite,
@@ -5756,7 +7129,48 @@ function foot_step(
 	if (dir !== TUNNEL && !Can_Reach(from, to, artwork.terrain, artwork.path_graph)) {
 		return false;
 	}
-	return can_enter_foot(artwork, mover, to, play, cells, allow_gate, skip_occupy);
+	if (!can_enter_foot(artwork, mover, to, play, cells, allow_gate, skip_occupy)) {
+		return false;
+	}
+	return ground_allows_step(artwork, mover, from, to);
+}
+
+function ground_cost(artwork: MapArtwork, mover: MapSprite, cell: Point2D): number {
+	const type = type_for_sprite(artwork, mover);
+	if (!type || mover.rtti === "aircraft" || type.speed_type === SPEED_WINGED) {
+		return 1;
+	}
+	const land = terrain_of(artwork.terrain, cell).land;
+	if (land < 0 || land >= LAND_COUNT) {
+		return 0;
+	}
+	const speed = type.speed_type;
+	if (speed < 0 || speed >= SPEED_COUNT) {
+		return 0;
+	}
+	return artwork.ground[land]?.[speed] ?? 0;
+}
+
+function ground_cell_ok(artwork: MapArtwork, mover: MapSprite, cell: Point2D): boolean {
+	if (ground_cost(artwork, mover, cell) !== 0) {
+		return true;
+	}
+	return deck_cell(artwork, cell);
+}
+
+function ground_allows_step(artwork: MapArtwork, mover: MapSprite, from: Point2D, to: Point2D): boolean {
+	if (ground_cost(artwork, mover, to) !== 0) {
+		return true;
+	}
+	if (!deck_cell(artwork, to)) {
+		return false;
+	}
+	const from_h = terrain_of(artwork.terrain, from).height;
+	const to_h = terrain_of(artwork.terrain, to).height;
+	if (Math.abs(from_h - to_h) === BRIDGE_CELL_HEIGHT) {
+		return true;
+	}
+	return deck_cell(artwork, from);
 }
 
 function nearby_enter(
@@ -5804,6 +7218,7 @@ export function Cameo_Right(artwork: MapArtwork, entry: BuildType): void {
 	const slot = entry.Factory as FactoryClass | null;
 	if (slot) {
 		if (!slot.Is_Building()) {
+			Speak(VOX_CANCELED);
 			Gain_Credits(artwork, slot.Abandon());
 			if (slot.QueuedObjects.length === 0) {
 				artwork.production.factories.delete(entry.BuildableType);
@@ -5815,6 +7230,7 @@ export function Cameo_Right(artwork: MapArtwork, entry: BuildType): void {
 			Refresh_Queue(artwork);
 			return;
 		}
+		Speak(VOX_SUSPENDED);
 		slot.Suspend();
 		return;
 	}
@@ -5823,6 +7239,26 @@ export function Cameo_Right(artwork: MapArtwork, entry: BuildType): void {
 		factory.Remove_From_Queue(entry.name);
 		Refresh_Queue(artwork);
 	}
+}
+
+function upgrade_host(artwork: MapArtwork, type: ShapeType, cell: Point2D): MapSprite | undefined {
+	const want = type.powers_up.toUpperCase();
+	return artwork.sprites.find(
+		(sprite) =>
+			sprite.rtti === "building" &&
+			sprite.owned &&
+			sprite.type_name.toUpperCase() === want &&
+			occupies(sprite, sprite.occupy, cell.x, cell.y),
+	);
+}
+
+function powerup_count(artwork: MapArtwork, host: MapSprite): number {
+	return artwork.sprites.filter((sprite) => {
+		if (sprite.x !== host.x || sprite.y !== host.y || sprite.rtti === "building" || !sprite.type_name) {
+			return false;
+		}
+		return (artwork.production.buildings.get(sprite.type_name.toUpperCase())?.powers_up.length ?? 0) > 0;
+	}).length;
 }
 
 export function Can_Place_Building(
@@ -5835,6 +7271,16 @@ export function Can_Place_Building(
 	const pending = artwork.production.pending;
 	if (!pending) {
 		return false;
+	}
+	const type = artwork.production.buildings.get(pending.name.toUpperCase());
+	if (type?.powers_up) {
+		if (!In_Radar_Cell(cell.x, cell.y, play) || !cells.has(`${cell.x},${cell.y}`)) {
+			return false;
+		}
+		if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
+			return false;
+		}
+		return upgrade_host(artwork, type, cell) !== undefined;
 	}
 	for (const offset of pending.occupy) {
 		const x = cell.x + offset.x;
@@ -5938,21 +7384,50 @@ export async function Place_Pending(
 	cells: Set<string>,
 ): Promise<boolean> {
 	const pending = artwork.production.pending;
-	if (!pending || !Can_Place_Building(artwork, cell, play, shroud, cells)) {
+	if (!pending) {
+		return false;
+	}
+	if (!Can_Place_Building(artwork, cell, play, shroud, cells)) {
+		Speak(VOX_DEPLOY);
 		return false;
 	}
 	const factory = artwork.production.factories.get(pending.kind);
 	if (!factory || !factory.Has_Completed() || factory.Object?.name !== pending.name) {
 		return false;
 	}
-	const placed = pending.sprites.map((sprite) => ({ ...sprite, x: cell.x, y: cell.y }));
+	const type = artwork.production.buildings.get(pending.name.toUpperCase());
+	const host = type?.powers_up ? upgrade_host(artwork, type, cell) : undefined;
+	if (host && type) {
+		const key = type.name.toUpperCase();
+		if (!host.upgrades.includes(key)) {
+			host.upgrades.push(key);
+		}
+	}
+	const host_type = host ? artwork.production.buildings.get(host.type_name.toUpperCase()) : undefined;
+	const loc = host_type?.powerup_loc[host ? powerup_count(artwork, host) : 0] ?? { x: 0, y: 0 };
+	const placed = pending.sprites.map((sprite) =>
+		host
+			? {
+					...sprite,
+					x: host.x,
+					y: host.y,
+					ox: sprite.ox + loc.x,
+					oy: sprite.oy + loc.y,
+					rtti: "" as const,
+					selectable: false,
+					select: null,
+					occupy: [{ x: 0, y: 0 }],
+					type_name: type?.name ?? sprite.type_name,
+				}
+			: { ...sprite, x: cell.x, y: cell.y },
+	);
 	const ready = await bind_sprite_shapes(directory, artwork, placed);
 	if (ready.length === 0) {
 		return false;
 	}
+	Menu_Click_Sound();
 	artwork.sprites.push(...ready);
 	Sort_Sprites(artwork);
-	const type = artwork.production.buildings.get(pending.name);
 	for (const sprite of ready) {
 		if (sprite.rtti === "building") {
 			Apply_Health_Status(artwork, sprite);
@@ -5963,6 +7438,9 @@ export async function Place_Pending(
 				PlayerPtr.Tracking_Add(sprite.rtti, sprite.type_name, Considered_Vehicle(type), type.insignificant);
 				Just_Built(PlayerPtr, sprite, type);
 			}
+			if (type?.has_spotlight) {
+				Attach_Building_Light(artwork, sprite);
+			}
 		}
 	}
 	if (type) {
@@ -5971,11 +7449,11 @@ export async function Place_Pending(
 		if (type.radar) {
 			artwork.has_radar = true;
 		}
-		if (type.sight > 0) {
+		if (!type.powers_up && type.sight > 0) {
 			artwork.lookers.push({ x: cell.x, y: cell.y, sight: type.sight });
 			shroud?.Sight_From(cell.x, cell.y, type.sight);
 		}
-		if (type.light_intensity !== 0) {
+		if (!type.powers_up && type.light_intensity !== 0) {
 			const at = building_light_coord(cell.x, cell.y, type.occupy);
 			artwork.lights.push({
 				x: at.x,
@@ -6018,6 +7496,7 @@ function Begin_Production(artwork: MapArtwork, entry: BuildType): boolean {
 		artwork.production.factories.set(entry.BuildableType, factory);
 	}
 	if (factory.Is_Building() && entry.BuildableType === "BuildingType") {
+		Speak(VOX_NO_FACTORY);
 		return false;
 	}
 	const same =
@@ -6042,11 +7521,21 @@ function Begin_Production(artwork: MapArtwork, entry: BuildType): boolean {
 	}
 	if (factory.Object === current && factory.QueuedObjects.length > 0 && !same) {
 		Refresh_Queue(artwork);
+		if (entry.BuildableType === "InfantryType") {
+			Speak(VOX_TRAINING);
+		} else {
+			Speak(VOX_BUILDING);
+		}
 		return true;
 	}
 	factory.Start();
 	Factory_Link(artwork, factory, entry.BuildableType, entry.BuildableID);
 	Refresh_Queue(artwork);
+	if (entry.BuildableType === "InfantryType") {
+		Speak(VOX_TRAINING);
+	} else {
+		Speak(VOX_BUILDING);
+	}
 	return true;
 }
 
@@ -6431,6 +7920,18 @@ async function bind_sprite_shapes(
 	}
 	const ready: MapSprite[] = [];
 	for (const sprite of sprites) {
+		if (sprite.voxel) {
+			const key = sprite.voxel.toUpperCase();
+			if (!artwork.voxels.has(key)) {
+				const model = await fetch_voxel_model(directory, sprite.voxel);
+				if (!model) {
+					continue;
+				}
+				artwork.voxels.set(key, model);
+			}
+			ready.push({ ...sprite, voxel: key });
+			continue;
+		}
 		const key = await fetch_shape(directory, cache, sprite.names);
 		if (!key) {
 			continue;

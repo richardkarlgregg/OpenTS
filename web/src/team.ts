@@ -43,6 +43,7 @@ export const TMISSION_PLAY_SPEECH = 24;
 export const TMISSION_PLAY_SOUND = 25;
 export const TMISSION_PLAY_MOVIE = 26;
 export const TMISSION_PLAY_MUSIC = 27;
+export const TMISSION_CENTER_VIEWPOINT = 34;
 export const TMISSION_SET_LOCAL = 39;
 export const TMISSION_CLEAR_LOCAL = 40;
 export const TMISSION_UNPANIC = 41;
@@ -366,6 +367,7 @@ export type TeamMember = {
 	team: TeamClass | null;
 	cargo: TeamMember[];
 	loaner: boolean;
+	hunt_mission: boolean;
 	x: number;
 	y: number;
 	strength: number;
@@ -503,6 +505,7 @@ export class TeamClass {
 	Disband(): void {
 		for (const member of this.Member.slice()) {
 			member.team = null;
+			member.hunt_mission = false;
 		}
 		this.Member = [];
 		this.Total = 0;

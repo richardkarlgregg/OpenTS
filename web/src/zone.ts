@@ -11,7 +11,14 @@
  ******************************************************************************/
 
 import type { Point2D } from "./ini";
-import type { CellTerrain } from "./walk";
+import {
+	LAND_BEACH,
+	LAND_ROCK,
+	LAND_WALL,
+	LAND_WATER,
+	type CellTerrain,
+} from "./walk";
+import { BRIDGE_SET_COUNT } from "./isotile";
 
 export const SUBZONE_FINE = 0;
 export const SUBZONE_ROUGH = 1;
@@ -19,8 +26,17 @@ export const SUBZONE_COARSE = 2;
 export const SUBZONE_COUNT = 3;
 
 export const PASSABLE_LAND = 0;
+export const PASSABLE_WATER = 3;
 export const PASSABLE_NO = 5;
 export const PASSABLE_OUTSIDE = 6;
+
+const FACING_N = 0;
+const FACING_E = 2;
+const FACING_S = 4;
+
+const BRIDGE_SUBTILES1 = [7, 7, -1, 7, 7, -1, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2];
+const BRIDGE_SUBTILES2 = [-1, -1, 4, -1, -1, 2, 4, 4, 4, 4, 4, 2, 2, 2, 2, 2];
+const BRIDGE_WALK_FACING = [FACING_E, FACING_E, -1, FACING_S, FACING_S, -1, FACING_E, FACING_E, FACING_E, FACING_E, FACING_E, FACING_S, FACING_S, FACING_S, FACING_S, FACING_S];
 
 const CLIFF_BACK_OFFSETS: readonly [number, number][] = [
 	[0, -1],
@@ -76,7 +92,14 @@ export type PathCell = {
 	zone: number;
 	subzone: [number, number, number];
 	under_bridge: boolean;
+	bridge_traversable: boolean;
 	tube: number;
+};
+
+export type HighBridgeMark = {
+	x: number;
+	y: number;
+	facing: number;
 };
 
 export type TubePath = {
@@ -171,6 +194,9 @@ export function Build_Path_Graph(
 	tubes: TubePath[] = [],
 	bridges: Point2D[] = [],
 	threat: Map<number, number> = new Map(),
+	high: HighBridgeMark[] = [],
+	bridge_set = -1,
+	train_bridge_set = -1,
 ): PathGraph {
 	const graph: PathGraph = {
 		cells: new Map(),
@@ -183,25 +209,87 @@ export function Build_Path_Graph(
 		const [xs, ys] = id.split(",");
 		const x = Number(xs);
 		const y = Number(ys);
-		const height = terrain_height(terrain, x, y);
-		const blocked = walls.has(id) || is_cliff_back_cell(terrain, x, y, cliff_back);
 		graph.cells.set(id, {
-			height,
-			passability: blocked ? PASSABLE_NO : PASSABLE_LAND,
+			height: terrain_height(terrain, x, y),
+			passability: PASSABLE_LAND,
 			zone: 0,
 			subzone: [0, 0, 0],
 			under_bridge: false,
+			bridge_traversable: true,
 			tube: -1,
 		});
 	}
+	for (const mark of high) {
+		Set_Under_Bridge(graph, mark, true);
+	}
+	for (const id of cells) {
+		const [xs, ys] = id.split(",");
+		const x = Number(xs);
+		const y = Number(ys);
+		const cell = graph.cells.get(id);
+		if (!cell) {
+			continue;
+		}
+		cell.passability = cell_passability(terrain, x, y, walls.has(id), cliff_back, cell);
+	}
 	flood_zones(graph);
+	stamp_tubes(graph, tubes);
+	stamp_bridges(graph, bridges);
+	stamp_tile_bridges(graph, terrain, bridge_set, train_bridge_set);
+	merge_zone_connections(graph);
 	for (let level = SUBZONE_COARSE; level >= SUBZONE_FINE; level--) {
 		flood_subzones(graph, level);
 	}
-	stamp_tubes(graph, tubes);
-	stamp_bridges(graph, bridges);
 	link_connections(graph);
 	return graph;
+}
+
+function cell_passability(
+	terrain: Map<string, CellTerrain>,
+	x: number,
+	y: number,
+	wall: boolean,
+	cliff_back: number,
+	cell: PathCell,
+): number {
+	if (wall) {
+		return PASSABLE_NO;
+	}
+	if (!cell.under_bridge && is_cliff_back_cell(terrain, x, y, cliff_back)) {
+		return PASSABLE_NO;
+	}
+	if (cell.under_bridge && cell.bridge_traversable) {
+		return PASSABLE_LAND;
+	}
+	const land = terrain.get(cell_key(x, y))?.land ?? 0;
+	if (land === LAND_WATER || land === LAND_BEACH) {
+		return PASSABLE_WATER;
+	}
+	if (land === LAND_ROCK || land === LAND_WALL) {
+		return PASSABLE_NO;
+	}
+	return PASSABLE_LAND;
+}
+
+function Set_Under_Bridge(graph: PathGraph, mark: HighBridgeMark, state: boolean): void {
+	const facing = mark.facing;
+	const back_dir = (facing + 4) & 7;
+	mark_bridge_cell(graph, mark.x, mark.y, state, true);
+	const across1 = adjacent_cell(mark, facing);
+	mark_bridge_cell(graph, across1.x, across1.y, state, true);
+	const across2 = adjacent_cell(across1, facing);
+	mark_bridge_cell(graph, across2.x, across2.y, state, false);
+	const back = adjacent_cell(mark, back_dir);
+	mark_bridge_cell(graph, back.x, back.y, state, true);
+}
+
+function mark_bridge_cell(graph: PathGraph, x: number, y: number, under: boolean, traversable: boolean): void {
+	const cell = graph.cells.get(cell_key(x, y));
+	if (!cell) {
+		return;
+	}
+	cell.under_bridge = under;
+	cell.bridge_traversable = under ? traversable : true;
 }
 
 function flood_zones(graph: PathGraph): void {
@@ -398,12 +486,6 @@ function stamp_tubes(graph: PathGraph, tubes: TubePath[]): void {
 
 function stamp_bridges(graph: PathGraph, bridges: Point2D[]): void {
 	const pending = new Set(bridges.map((cell) => cell_key(cell.x, cell.y)));
-	for (const id of pending) {
-		const cell = graph.cells.get(id);
-		if (cell) {
-			cell.under_bridge = true;
-		}
-	}
 	const seen = new Set<string>();
 	for (const seed of bridges) {
 		const start = cell_key(seed.x, seed.y);
@@ -460,6 +542,122 @@ function stamp_bridges(graph: PathGraph, bridges: Point2D[]): void {
 	}
 }
 
+function tile_in_bridge_set(tile: number, start: number): boolean {
+	return start >= 0 && tile >= start && tile < start + BRIDGE_SET_COUNT;
+}
+
+function stamp_tile_bridges(
+	graph: PathGraph,
+	terrain: Map<string, CellTerrain>,
+	bridge_set: number,
+	train_bridge_set: number,
+): void {
+	if (bridge_set < 0 && train_bridge_set < 0) {
+		return;
+	}
+	for (const [id] of graph.cells) {
+		const [xs, ys] = id.split(",");
+		const here = { x: Number(xs), y: Number(ys) };
+		const rec = terrain.get(id);
+		if (!rec) {
+			continue;
+		}
+		let faceindex = -1;
+		if (tile_in_bridge_set(rec.tile, bridge_set)) {
+			faceindex = rec.tile - bridge_set;
+		} else if (tile_in_bridge_set(rec.tile, train_bridge_set)) {
+			faceindex = rec.tile - train_bridge_set;
+		}
+		if (faceindex < 0 || faceindex >= BRIDGE_SUBTILES1.length) {
+			continue;
+		}
+		if (BRIDGE_SUBTILES1[faceindex] !== rec.subtile) {
+			continue;
+		}
+		const facing = BRIDGE_WALK_FACING[faceindex] ?? -1;
+		if (facing < 0) {
+			continue;
+		}
+		let crossed = false;
+		let passable = true;
+		let cursor = { ...here };
+		for (;;) {
+			cursor = adjacent_cell(cursor, facing);
+			const next = graph.cells.get(cell_key(cursor.x, cursor.y));
+			const next_rec = terrain.get(cell_key(cursor.x, cursor.y));
+			if (next && next_rec) {
+				if (!crossed) {
+					let index = -1;
+					if (tile_in_bridge_set(next_rec.tile, bridge_set)) {
+						index = next_rec.tile - bridge_set;
+					} else if (tile_in_bridge_set(next_rec.tile, train_bridge_set)) {
+						index = next_rec.tile - train_bridge_set;
+					}
+					if (index >= 0 && BRIDGE_SUBTILES2[index] === next_rec.subtile) {
+						crossed = true;
+					} else if (!next.under_bridge) {
+						passable = false;
+					}
+					continue;
+				}
+			} else if (!crossed) {
+				break;
+			}
+			graph.connections.push({
+				from: here,
+				to: adjacent_cell(cursor, (facing + 4) & 7),
+				passable,
+				kind: "bridge",
+			});
+			break;
+		}
+	}
+}
+
+function merge_zone_connections(graph: PathGraph): void {
+	const parent = new Map<number, number>();
+	const find = (zone: number): number => {
+		let root = parent.get(zone) ?? zone;
+		if (root !== zone) {
+			root = find(root);
+			parent.set(zone, root);
+		}
+		parent.set(zone, root);
+		return root;
+	};
+	const union = (left: number, right: number): void => {
+		if (left <= 0 || right <= 0) {
+			return;
+		}
+		const a = find(left);
+		const b = find(right);
+		if (a !== b) {
+			parent.set(a, b);
+		}
+	};
+	for (const cell of graph.cells.values()) {
+		parent.set(cell.zone, cell.zone);
+	}
+	for (const link of graph.connections) {
+		if (!link.passable) {
+			continue;
+		}
+		const from = graph_cell(graph, link.from);
+		const to = graph_cell(graph, link.to);
+		union(from?.zone ?? 0, to?.zone ?? 0);
+		if (link.kind !== "bridge") {
+			continue;
+		}
+		const eastwest = link.from.x !== link.to.x;
+		const along = eastwest ? FACING_E : FACING_S;
+		union(graph_cell(graph, adjacent_cell(link.from, along + 4))?.zone ?? 0, from?.zone ?? 0);
+		union(graph_cell(graph, adjacent_cell(link.to, along))?.zone ?? 0, to?.zone ?? 0);
+	}
+	for (const cell of graph.cells.values()) {
+		cell.zone = find(cell.zone);
+	}
+}
+
 function link_connections(graph: PathGraph): void {
 	for (const link of graph.connections) {
 		const pairs: [Point2D, Point2D][] = [[link.from, link.to]];
@@ -476,9 +674,11 @@ function link_connections(graph: PathGraph): void {
 			}
 		} else {
 			const eastwest = link.from.x !== link.to.x;
-			const side = eastwest ? 0 : 2;
+			const side = eastwest ? FACING_N : FACING_E;
+			const along = eastwest ? FACING_E : FACING_S;
 			pairs.push([adjacent_cell(link.from, side), adjacent_cell(link.to, side)]);
 			pairs.push([adjacent_cell(link.from, side + 4), adjacent_cell(link.to, side + 4)]);
+			pairs.push([adjacent_cell(link.from, along + 4), adjacent_cell(link.to, along)]);
 		}
 		for (let level = 0; level < SUBZONE_COUNT; level++) {
 			for (const [a, b] of pairs) {

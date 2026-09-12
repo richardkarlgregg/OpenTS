@@ -20,9 +20,14 @@ import {
 	PlayerPtr,
 } from "./house";
 import type { INIClass, Point2D } from "./ini";
+import { Fetch_String, TXT_DIFFICULTY_LEVEL, TXT_EASY, TXT_HARD, TXT_MEDIUM } from "./language";
+import { Movie_Filename, VQ_NONE } from "./movies";
+import { Options } from "./options";
 import { Create_Team, Queue_Reinforcements, type PendingTeam } from "./team";
 import type { ShroudMap } from "./shroud";
 import { TICKS_PER_MINUTE, TICKS_PER_SECOND } from "./stimer";
+import { Sound_Effect } from "./voc";
+import { Speak, VOX_ACCOMPLISHED, VOX_FAIL } from "./vox";
 
 export const TEVENT_NONE = 0;
 export const TEVENT_PLAYER_ENTERED = 1;
@@ -39,6 +44,8 @@ export const TEVENT_LOCAL_SET = 36;
 export const TEVENT_LOCAL_CLEAR = 37;
 export const TEVENT_DESTROYED_ANY = 48;
 export const TEVENT_RANDOM_TIME = 51;
+export const TEVENT_ENEMY_IN_SPOTLIGHT = 35;
+export const TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING = 54;
 
 export const TACTION_NONE = 0;
 export const TACTION_WIN = 1;
@@ -46,6 +53,7 @@ export const TACTION_LOSE = 2;
 export const TACTION_CREATE_TEAM = 4;
 export const TACTION_ALL_HUNT = 6;
 export const TACTION_REINFORCEMENTS = 7;
+export const TACTION_PLAY_MOVIE = 10;
 export const TACTION_TEXT_TRIGGER = 11;
 export const TACTION_DESTROY_TRIGGER = 12;
 export const TACTION_REVEAL_SOME = 17;
@@ -83,6 +91,9 @@ const ATTACH_GENERAL = 0x10;
 const DIFF_EASY = 0;
 const DIFF_NORMAL = 1;
 const DIFF_HARD = 2;
+const DIFF_COUNT = 3;
+const MAX_MESSAGES = 6;
+export const MESSAGE_LINE = 14;
 const SCEN_LOCAL_COUNT = 50;
 const PARAM_CODE_OTHER = 0;
 const PARAM_CODE_TEAM = 1;
@@ -98,18 +109,25 @@ export type TriggerSprite = {
 	bridge: boolean;
 };
 
+export type GameMessage = {
+	text: string;
+	timer: number;
+};
+
 export type TriggerWorld = {
 	waypoints: Map<number, Point2D>;
 	cell_tags: Map<string, TagClass>;
-	message: string;
-	message_timer: number;
+	messages: GameMessage[];
 	center_on: Point2D | null;
+	center_speed: number;
 	input_locked: boolean;
 	ended: "" | "win" | "lose";
 	reveal_radius: number;
 	is_global_changed: boolean;
 	sprites: TriggerSprite[];
 	pending_teams: PendingTeam[];
+	pending_movie: string[];
+	pending_ingame: string[];
 };
 
 export const TriggerTypes: TriggerTypeClass[] = [];
@@ -136,6 +154,8 @@ export class TEventClass {
 			case TEVENT_BUILD_UNIT:
 			case TEVENT_BUILD_INFANTRY:
 			case TEVENT_BUILD_AIRCRAFT:
+			case TEVENT_ENEMY_IN_SPOTLIGHT:
+			case TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING:
 				return true;
 			default:
 				return false;
@@ -143,7 +163,7 @@ export class TEventClass {
 	}
 
 	Is_To_Flag_As_Tripped(): boolean {
-		return this.Event !== TEVENT_PLAYER_ENTERED;
+		return this.Event !== TEVENT_PLAYER_ENTERED && this.Event !== TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING;
 	}
 
 	operator(event: number, house: HouseClass | null, object: TriggerSprite | null, timer: number, tripped: { value: boolean }): boolean {
@@ -247,6 +267,10 @@ export class TEventClass {
 			case TEVENT_DESTROYED_ANY:
 				attach |= ATTACH_OBJECT;
 				break;
+			case TEVENT_ENEMY_IN_SPOTLIGHT:
+			case TEVENT_ENEMY_IN_SPOTLIGHT_REPEATING:
+				attach |= ATTACH_OBJECT;
+				break;
 			case TEVENT_BUILD:
 			case TEVENT_BUILD_UNIT:
 			case TEVENT_BUILD_INFANTRY:
@@ -277,7 +301,13 @@ export class TActionClass {
 	Waypoint = -1;
 	Next: TActionClass | null = null;
 
-	operator(world: TriggerWorld, shroud: ShroudMap | null, _house: HouseClass | null, _object: TriggerSprite | null): boolean {
+	operator(
+		world: TriggerWorld,
+		shroud: ShroudMap | null,
+		_house: HouseClass | null,
+		_object: TriggerSprite | null,
+		trigger: TriggerClass | null = null,
+	): boolean {
 		switch (this.Action) {
 			case TACTION_WIN:
 				flag_end(world, house_matches_player(this.Data) ? "win" : "lose");
@@ -288,8 +318,7 @@ export class TActionClass {
 			case TACTION_TEXT_TRIGGER: {
 				const text = TutorialLines.get(this.Data) ?? "";
 				if (text) {
-					world.message = text;
-					world.message_timer = Math.max(1, Math.trunc(0.6 * TICKS_PER_MINUTE));
+					Add_Message(world, text, Math.max(1, Math.trunc(0.6 * TICKS_PER_MINUTE)));
 				}
 				return true;
 			}
@@ -312,6 +341,7 @@ export class TActionClass {
 				const cell = world.waypoints.get(this.Waypoint);
 				if (cell) {
 					world.center_on = { x: cell.x, y: cell.y };
+					world.center_speed = this.Data;
 				}
 				return true;
 			}
@@ -354,10 +384,38 @@ export class TActionClass {
 			case TACTION_REINFORCEMENTS_SPECIAL:
 				Queue_Reinforcements(world.pending_teams, this.Team, this.Waypoint, true);
 				return true;
+			case TACTION_ALL_HUNT: {
+				const target = House_From_HousesType(this.Data);
+				if (target) {
+					target.IsAllToHunt = true;
+				}
+				return true;
+			}
+			case TACTION_PLAY_MOVIE: {
+				if (this.Data !== VQ_NONE) {
+					const name = Movie_Filename(this.Data);
+					if (name) {
+						world.pending_movie.push(name);
+					}
+				}
+				return true;
+			}
+			case TACTION_PLAY_INGAME_MOVIE: {
+				if (this.Data !== VQ_NONE) {
+					const name = Movie_Filename(this.Data);
+					if (name) {
+						world.pending_ingame.push(name);
+					}
+				}
+				return true;
+			}
 			case TACTION_PLAY_SPEECH:
+				Speak(this.Data);
+				return true;
 			case TACTION_PLAY_SOUND:
+				Sound_Effect(this.Data);
+				return true;
 			case TACTION_PLAY_ANIM:
-			case TACTION_PLAY_INGAME_MOVIE:
 			case TACTION_LIGHT_SMALL:
 			case TACTION_LIGHT_MEDIUM:
 			case TACTION_LIGHT_LARGE:
@@ -366,9 +424,29 @@ export class TActionClass {
 			case TACTION_METEOR_SHOWER:
 			case TACTION_DAMAGE:
 			case TACTION_DESTROY_OBJECT:
-			case TACTION_ALL_HUNT:
-			case TACTION_CHANGE_SPOTLIGHT_BEHAVIOR:
 				return true;
+			case TACTION_CHANGE_SPOTLIGHT_BEHAVIOR: {
+				if (!trigger) {
+					return true;
+				}
+				for (const sprite of world.sprites) {
+					const light = (
+						sprite as {
+							strength?: number;
+							building_light?: { Set_Behavior_Type(artwork: unknown, type: number): void } | null;
+						}
+					).building_light;
+					const strength = (sprite as { strength?: number }).strength ?? 0;
+					if (sprite.rtti !== "building" || strength <= 0 || !sprite.tag || !light) {
+						continue;
+					}
+					if (!sprite.tag.Is_Trigger_Attached(trigger)) {
+						continue;
+					}
+					light.Set_Behavior_Type(world, this.Data);
+				}
+				return true;
+			}
 			default:
 				return true;
 		}
@@ -649,7 +727,7 @@ export class TriggerClass {
 		let done = false;
 		let action = this.Class.FirstAction;
 		while (action) {
-			if (action.operator(world, shroud, this.Class.House, object)) {
+			if (action.operator(world, shroud, this.Class.House, object, this)) {
 				done = true;
 			}
 			action = action.Next;
@@ -737,6 +815,17 @@ export class TagClass {
 			this.Trigger = trigger;
 			tt = tt.LinkedTo;
 		}
+	}
+
+	Is_Trigger_Attached(trigger: TriggerClass): boolean {
+		let trigptr = this.Trigger;
+		while (trigptr) {
+			if (trigptr === trigger) {
+				return true;
+			}
+			trigptr = trigptr.LinkedTo;
+		}
+		return false;
 	}
 
 	Spring(
@@ -856,7 +945,7 @@ export function Init_Triggers(): void {
 	LogicTags.length = 0;
 	LocalFlags.length = 0;
 	TutorialLines.clear();
-	Difficulty = DIFF_NORMAL;
+	Difficulty = Math.max(DIFF_EASY, Math.min(DIFF_HARD, Options.Difficulty));
 	for (let i = 0; i < SCEN_LOCAL_COUNT; i++) {
 		LocalFlags.push({ name: "", value: false });
 	}
@@ -949,12 +1038,12 @@ export function Attach_Named_Tag(object: TriggerSprite, name: string | undefined
 }
 
 export function Logic_AI(world: TriggerWorld, shroud: ShroudMap | null): void {
-	if (world.message_timer > 0) {
-		world.message_timer--;
-		if (world.message_timer === 0) {
-			world.message = "";
+	for (const line of world.messages) {
+		if (line.timer > 0) {
+			line.timer--;
 		}
 	}
+	world.messages = world.messages.filter((line) => line.timer > 0);
 	for (const trigger of Triggers) {
 		if (trigger.Timer > 0) {
 			trigger.Timer--;
@@ -1042,8 +1131,25 @@ function fetch_local(index: number): boolean {
 
 function flag_end(world: TriggerWorld, ended: "win" | "lose"): void {
 	world.ended = ended;
-	world.message = ended === "win" ? "Mission accomplished" : "Mission failed";
-	world.message_timer = TICKS_PER_MINUTE;
+	Speak(ended === "win" ? VOX_ACCOMPLISHED : VOX_FAIL);
+	Add_Message(world, ended === "win" ? "Mission accomplished" : "Mission failed", TICKS_PER_MINUTE);
+}
+
+export function Add_Message(world: TriggerWorld, text: string, timer: number): void {
+	if (!text) {
+		return;
+	}
+	world.messages.push({ text, timer });
+	if (world.messages.length > MAX_MESSAGES) {
+		world.messages.shift();
+	}
+}
+
+export function Difficulty_Start_Text(): string {
+	const computer = DIFF_COUNT - 1 - Math.max(DIFF_EASY, Math.min(DIFF_HARD, Options.Difficulty));
+	const names = [TXT_HARD, TXT_MEDIUM, TXT_EASY];
+	const named = Fetch_String(names[computer] ?? TXT_MEDIUM);
+	return Fetch_String(TXT_DIFFICULTY_LEVEL).replace("%s", named);
 }
 
 function house_matches_player(selector: number): boolean {
@@ -1060,6 +1166,9 @@ function read_tutorial_section(ini: INIClass | null): void {
 	const count = ini.entry_count("Tutorial");
 	for (let i = 0; i < count; i++) {
 		const entry = ini.get_entry("Tutorial", i);
+		if (!/^\d+$/.test(entry.trim())) {
+			continue;
+		}
 		TutorialLines.set(atoi(entry), ini.get_string("Tutorial", entry, ""));
 	}
 }

@@ -17,6 +17,11 @@ export class OptionsClass {
 	ScrollRate = 3;
 	AutoScroll = true;
 	SidebarSorting = true;
+	Difficulty = 1;
+	StretchMovies = false;
+	SoundVolume = 0.7;
+	ScoreVolume = 0.5;
+	VoiceVolume = 1;
 
 	Normalize_Delay(delay: number): number {
 		const adjust = [

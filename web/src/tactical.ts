@@ -15,6 +15,7 @@ import type { Point2D, Rect } from "./ini";
 import {
 	blit_iso_tile,
 	fetch_subtile,
+	land_from_tile_type,
 	ISO_TILE_PIXEL_H,
 	ISO_TILE_PIXEL_W,
 	LEVEL_PIXEL_H,
@@ -34,6 +35,7 @@ import {
 	ActionLineTimer,
 	Action_Line_AI,
 	Anim_Logic,
+	Prune_Dead_Anims,
 	Assign_Group_Move,
 	Assign_Target,
 	Abort_Drag_Select,
@@ -45,6 +47,7 @@ import {
 	Can_Demolish,
 	Can_Move_To,
 	Can_Place_Building,
+	Can_Player_Move,
 	Can_Repair,
 	Can_Sell_Wall,
 	Can_Toggle_Power,
@@ -82,6 +85,16 @@ import {
 	type MapSprite,
 } from "./objects";
 import { Options } from "./options";
+import { Draw_Building_Lights, Refresh_Building_Light_Arcs } from "./blight";
+import { SpotLight_One_Time } from "./ovrlight";
+import {
+	Advance_Ingame_Movies,
+	Blit_Ingame_Movies,
+	Has_Ingame_Movies,
+	Play_Ingame_Movie_Name,
+	Play_Movie,
+	Stop_Ingame_Movie,
+} from "./movies";
 import { canvas_mouse, present, type CanvasLabel } from "./present";
 import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
 import { blit_shape, blit_shape_shadow } from "./shp";
@@ -104,6 +117,9 @@ import {
 } from "./sidebar";
 import { TIMER_SECOND } from "./stimer";
 import { build_hicolor_pixel, DSurface } from "./surface";
+import { Theme } from "./theme";
+import { Menu_Click_Sound, Set_Game_Active, Set_Sound_View } from "./voc";
+import { Speak_Tick } from "./vox";
 import { Cell_Center } from "./walk";
 import {
 	Can_Add_Waypoint_To_Path,
@@ -113,6 +129,7 @@ import {
 	Waypoint_At,
 } from "./waypoint";
 import type { FactoryObject } from "./factory";
+import { MESSAGE_LINE } from "./trigger";
 
 type IsoCell = { x: number; y: number; height: number; tile: number; subtile: number };
 
@@ -252,6 +269,15 @@ function gather_cells(cells: IsoCell[], play: Rect, fill_height: number): IsoCel
 	}
 	list.sort((a, b) => a.x + a.y - (b.x + b.y) || a.x - b.x);
 	return list;
+}
+
+const SCROLL_SPEEDS = [0.0015, 0.003, 0.0075, 0.03, 0.06];
+
+function lerp_point(from: Point2D, to: Point2D, factor: number): Point2D {
+	return {
+		x: Math.trunc(from.x + (to.x - from.x) * factor),
+		y: Math.trunc(from.y + (to.y - from.y) * factor),
+	};
 }
 
 function starting_camera(cells: IsoCell[], play: Rect, local: Rect, home: Point2D | null): Point2D {
@@ -400,7 +426,8 @@ function draw_view(
 			}
 			const draw = sprite_draw_point(sprite, origin, heights);
 			const dx = draw.x;
-			const dy = draw.y;
+			const fly = shadow ? Z_Lepton_To_Pixel(sprite.foot?.height_agl ?? 0) : 0;
+			const dy = draw.y + fly;
 			if (dx < -128 || dy < -160 || dx >= VIEW_W + 128 || dy >= VIEW_H + 160) {
 				return;
 			}
@@ -471,6 +498,14 @@ function draw_view(
 		if (ActionLineTimer > 0) {
 			draw_move_lines(frame, origin, artwork, heights, ramps);
 		}
+		Draw_Building_Lights(artwork, {
+			frame,
+			origin,
+			clip: { x: 0, y: 0, width: VIEW_W, height: VIEW_H },
+			coord_to_pixel: (coord) => Coord_To_Pixel(coord, origin),
+			z_lepton_to_pixel: Z_Lepton_To_Pixel,
+			is_mapped: (x, y) => !shroud || shroud.IsMapped(x, y),
+		});
 		if (ghost && artwork.production.pending) {
 			const tint = ghost.legal ? build_hicolor_pixel(0, 200, 0) : build_hicolor_pixel(200, 0, 0);
 			for (const offset of artwork.production.pending.occupy) {
@@ -1043,14 +1078,20 @@ function composite_view(
 	if (radar && radar_on) {
 		Render_Radar(frame, radar, cells, tiles, shroud, artwork?.sprites ?? [], camera);
 	}
-	if (artwork?.message) {
-		labels.push({
-			x: TAC_X + 8,
-			y: TAC_Y + TAC_H - 22,
-			width: TAC_W - 16,
-			height: 16,
-			text: artwork.message,
-		});
+	if (Has_Ingame_Movies()) {
+		Blit_Ingame_Movies(frame);
+	}
+	if (artwork) {
+		for (let i = 0; i < artwork.messages.length; i++) {
+			labels.push({
+				x: TAC_X,
+				y: TAC_Y + i * MESSAGE_LINE,
+				width: TAC_W - 8,
+				height: MESSAGE_LINE,
+				text: artwork.messages[i]!.text,
+				align: "left",
+			});
+		}
 	}
 	return { frame, labels };
 }
@@ -1364,11 +1405,17 @@ export async function Show_Tactical(
 	if (artwork) {
 		artwork.terrain.clear();
 		for (const cell of draw_list) {
+			const sub = fetch_subtile(tiles, cell.tile, cell.subtile);
 			artwork.terrain.set(`${cell.x},${cell.y}`, {
 				height: cell.height,
-				ramp: fetch_subtile(tiles, cell.tile, cell.subtile)?.ramp ?? 0,
+				ramp: sub?.ramp ?? 0,
+				land: land_from_tile_type(sub?.tile_type ?? 0),
+				tile: cell.tile,
+				subtile: cell.subtile,
 			});
 		}
+		SpotLight_One_Time(artwork.spotlight.SpotlightRadius);
+		Refresh_Building_Light_Arcs(artwork);
 	}
 	const lighting = artwork?.lighting ?? DAYLIGHT;
 	const palettes = new Map<string, Uint16Array>();
@@ -1396,6 +1443,8 @@ export async function Show_Tactical(
 	}
 	const cell_keys = new Set(heights.keys());
 	if (artwork) {
+		artwork.bridge_set = tiles.bridge_set;
+		artwork.train_bridge_set = tiles.train_bridge_set;
 		Bind_Path_Graph(artwork, cell_keys);
 	}
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
@@ -1408,6 +1457,10 @@ export async function Show_Tactical(
 	}
 
 	let camera = clamp_to_tactical_rect(starting_camera(draw_list, play, local, home), play, local);
+	let move_from = camera;
+	let move_to = camera;
+	let move_speed = 0;
+	let move_factor = 0;
 	const scroll: ScrollState = {
 		inertia: 0,
 		remainder: 0,
@@ -1415,7 +1468,7 @@ export async function Show_Tactical(
 		mouse_down: false,
 		direction: 0,
 		inertia_ready: true,
-		near_canvas: true,
+		near_canvas: false,
 	};
 	const previous_cursor = canvas.style.cursor;
 	canvas.style.cursor = mouse.MouseShapes ? "none" : previous_cursor;
@@ -1453,7 +1506,7 @@ export async function Show_Tactical(
 			ghost,
 			mouse,
 		);
-		if (mouse.MouseShapes) {
+		if (mouse.MouseShapes && scroll.near_canvas && !artwork?.input_locked) {
 			mouse.Draw_Mouse(view.frame, hud.palette);
 		}
 		present(canvas, view.frame, view.labels);
@@ -1471,11 +1524,47 @@ export async function Show_Tactical(
 		if (!artwork) {
 			return;
 		}
+		const origin = view_origin(camera);
+		Set_Sound_View({
+			origin,
+			width: VIEW_W,
+			height: VIEW_H,
+			coord_to_pixel: (lx, ly, z) => Coord_To_Pixel({ x: lx, y: ly, z }, origin),
+		});
+		if (artwork.pending_ingame.length > 0) {
+			const name = artwork.pending_ingame.shift()!;
+			void Play_Ingame_Movie_Name(directory, name);
+		}
+		if (artwork.ended) {
+			const name = artwork.ended === "win" ? artwork.win_movie : artwork.lose_movie;
+			if (name) {
+				artwork.pending_movie.push(name);
+				artwork.win_movie = "";
+				artwork.lose_movie = "";
+			}
+		}
+		Advance_Ingame_Movies();
+		Theme.AI();
 		LogicClass_AI(artwork);
 		Team_AI(artwork, play, cell_keys, shroud);
 		if (artwork.center_on) {
-			camera = clamp_to_tactical_rect(starting_camera(draw_list, play, local, artwork.center_on), play, local);
+			move_from = camera;
+			move_to = clamp_to_tactical_rect(starting_camera(draw_list, play, local, artwork.center_on), play, local);
+			const speed = Math.max(0, Math.min(SCROLL_SPEEDS.length - 1, artwork.center_speed | 0));
+			move_speed = SCROLL_SPEEDS[speed]!;
+			move_factor = 0;
 			artwork.center_on = null;
+		}
+		if (move_speed !== 0) {
+			move_factor += move_speed;
+			if (move_factor > 1) {
+				move_factor = 1;
+			}
+			camera = clamp_to_tactical_rect(lerp_point(move_from, move_to, move_factor), play, local);
+			if (move_factor >= 1) {
+				move_speed = 0;
+				move_factor = 0;
+			}
 		}
 		const ready = Factory_AI(artwork);
 		Gate_AI(artwork);
@@ -1492,6 +1581,7 @@ export async function Show_Tactical(
 		for (const sprite of artwork.sprites) {
 			Anim_Logic(sprite);
 		}
+		Prune_Dead_Anims(artwork);
 		House_AI(artwork);
 		if (ready.length) {
 			exits.push(...ready);
@@ -1517,6 +1607,7 @@ export async function Show_Tactical(
 	};
 
 	const system_tick = (): void => {
+		Speak_Tick();
 		mouse.System_Tick();
 		frame_timer--;
 		if (frame_timer <= 0) {
@@ -1525,10 +1616,14 @@ export async function Show_Tactical(
 		}
 	};
 
+	Set_Game_Active(true);
 	await new Promise<void>((resolve) => {
 		let busy = false;
 		const finish = (): void => {
 			cancelAnimationFrame(raf);
+			Set_Game_Active(false);
+			Set_Sound_View(null);
+			Stop_Ingame_Movie();
 			canvas.style.cursor = previous_cursor;
 			canvas.removeEventListener("mousedown", on_down);
 			canvas.removeEventListener("contextmenu", on_menu);
@@ -1548,9 +1643,9 @@ export async function Show_Tactical(
 				x: Math.min(SCREEN_W - 1, Math.max(0, point.x)),
 				y: Math.min(SCREEN_H - 1, Math.max(0, point.y)),
 			};
-			canvas.style.cursor = mouse.MouseShapes && scroll.near_canvas ? "none" : previous_cursor;
+			canvas.style.cursor = mouse.MouseShapes && (artwork?.input_locked || scroll.near_canvas) ? "none" : previous_cursor;
 			shift_down = event.shiftKey;
-			if (scroll.mouse_down && artwork && (event.buttons & 1) !== 0) {
+			if (scroll.mouse_down && artwork && !artwork.input_locked && (event.buttons & 1) !== 0) {
 				Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
 				if (artwork.is_rubber_band) {
 					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
@@ -1621,21 +1716,25 @@ export async function Show_Tactical(
 			if (artwork && mouse.Point.x >= TAC_W) {
 				const button = Sidebar_Button_At(mouse.Point, hud);
 				if (button === "repair") {
+					Menu_Click_Sound();
 					Repair_Mode_Control(artwork, -1);
 					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 					return;
 				}
 				if (button === "sell") {
+					Menu_Click_Sound();
 					Sell_Mode_Control(artwork, -1);
 					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 					return;
 				}
 				if (button === "power") {
+					Menu_Click_Sound();
 					Power_Mode_Control(artwork, -1);
 					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 					return;
 				}
 				if (button === "waypoint") {
+					Menu_Click_Sound();
 					Waypoint_Mode_Control(artwork, -1);
 					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 					return;
@@ -1745,13 +1844,13 @@ export async function Show_Tactical(
 					Unselect_All(artwork);
 					Select(artwork, hover);
 				}
-			} else if (cell && chosen?.foot && Waypoint_At(artwork.paths, cell)) {
+			} else if (cell && chosen && Can_Player_Move(chosen) && Waypoint_At(artwork.paths, cell)) {
 				for (const sprite of artwork.current_object) {
-					if (sprite.foot) {
+					if (Can_Player_Move(sprite)) {
 						Follow_Waypoint(artwork, sprite, cell, play, cell_keys);
 					}
 				}
-			} else if (chosen?.foot && cell) {
+			} else if (chosen && Can_Player_Move(chosen) && cell) {
 				Assign_Group_Move(artwork, cell, play, cell_keys);
 			} else if (cell && Waypoint_At(artwork.paths, cell)) {
 				const data = Fetch_Waypoint_Data(artwork.paths, Waypoint_At(artwork.paths, cell));
@@ -1839,6 +1938,19 @@ export async function Show_Tactical(
 				finish();
 				return;
 			}
+			if (busy) {
+				raf = requestAnimationFrame(tick);
+				return;
+			}
+			if (artwork && artwork.pending_movie.length > 0) {
+				const name = artwork.pending_movie.shift()!;
+				busy = true;
+				void Play_Movie(directory, { canvas, cancelled }, name).finally(() => {
+					busy = false;
+				});
+				raf = requestAnimationFrame(tick);
+				return;
+			}
 			sys_accum += now - last_tick;
 			last_tick = now;
 			const tick_ms = 1000 / TIMER_SECOND;
@@ -1846,11 +1958,17 @@ export async function Show_Tactical(
 				sys_accum -= tick_ms;
 				system_tick();
 			}
-			camera = artwork?.input_locked ? camera : scroll_edge(mouse, camera, play, local, scroll, now);
-			if (artwork && scroll.mouse_down) {
-				Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
+			if (artwork?.input_locked) {
+				if (mouse.CurrentMouseShape !== MOUSE_NORMAL) {
+					mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
+				}
+			} else if (move_speed === 0) {
+				camera = scroll_edge(mouse, camera, play, local, scroll, now);
+				if (artwork && scroll.mouse_down) {
+					Mouse_Left_Held(artwork, tactical_mouse(mouse.Point), { x: VIEW_W, y: VIEW_H });
+				}
 			}
-			if (artwork) {
+			if (artwork && !artwork.input_locked) {
 				if (artwork.is_rubber_band) {
 					mouse.Override_Mouse_Shape(MOUSE_NORMAL, false);
 				} else if (artwork.is_repair_mode || artwork.is_sell_mode || artwork.is_power_mode) {
@@ -1922,11 +2040,11 @@ export async function Show_Tactical(
 							} else {
 								mouse.Override_Mouse_Shape(MOUSE_CAN_SELECT, false);
 							}
-						} else if (waypoint && chosen?.foot) {
+						} else if (waypoint && chosen && Can_Player_Move(chosen)) {
 							mouse.Override_Mouse_Shape(MOUSE_FOLLOW_WAYPOINT, false);
 						} else if (waypoint) {
 							mouse.Override_Mouse_Shape(MOUSE_ENTER_WAYPOINT_MODE, false);
-						} else if (chosen?.foot && cell) {
+						} else if (chosen && Can_Player_Move(chosen) && cell) {
 							mouse.Override_Mouse_Shape(
 								Can_Move_To(artwork, chosen, cell, play, cell_keys) ? MOUSE_CAN_MOVE : MOUSE_NO_MOVE,
 								false,

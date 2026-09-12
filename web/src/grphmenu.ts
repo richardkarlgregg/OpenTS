@@ -14,6 +14,8 @@ import { key_from_description, key_from_event } from "./keys";
 import { read_pcx } from "./pcx";
 import { canvas_mouse, present } from "./present";
 import { DSurface } from "./surface";
+import { Theme } from "./theme";
+import { Menu_Click_Sound } from "./voc";
 
 export type GraphicMenuItem = {
 	id: number;
@@ -235,12 +237,15 @@ export function Presentation(
 	return new Promise((resolve) => {
 		let selected: GraphicMenuItem | null = null;
 		let done = false;
+		Theme.Play_Song(Theme.From_Name(menu.theme_name));
+		const tick = window.setInterval(() => Theme.AI(), 250);
 
 		const finish = (id: number): void => {
 			if (done) {
 				return;
 			}
 			done = true;
+			window.clearInterval(tick);
 			canvas.removeEventListener("mousemove", on_move);
 			canvas.removeEventListener("click", on_click);
 			window.removeEventListener("keydown", on_key);
@@ -269,6 +274,7 @@ export function Presentation(
 			const mouse = canvas_mouse(canvas, event);
 			const item = item_under_mouse(menu, mouse.x, mouse.y);
 			if (item) {
+				Menu_Click_Sound();
 				finish(item.id);
 			}
 		};
@@ -280,12 +286,14 @@ export function Presentation(
 			}
 			if (event.key === "Enter" && selected) {
 				event.preventDefault();
+				Menu_Click_Sound();
 				finish(selected.id);
 				return;
 			}
 			const keyed = item_for_key(menu, key_from_event(event));
 			if (keyed) {
 				event.preventDefault();
+				Menu_Click_Sound();
 				finish(keyed.id);
 			}
 		};

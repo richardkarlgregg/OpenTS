@@ -371,7 +371,8 @@ function search_cells(
 			if (corridor && graph && !(next.x === to.x && next.y === to.y)) {
 				const marked = graph_cell(graph, next);
 				const sid = marked?.subzone[SUBZONE_FINE] ?? 0;
-				if ((corridor[sid] ?? 0) !== stamp) {
+				const on_deck = !!marked?.under_bridge && marked.bridge_traversable;
+				if (!on_deck && (corridor[sid] ?? 0) !== stamp) {
 					continue;
 				}
 			}

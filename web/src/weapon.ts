@@ -12,6 +12,7 @@
 
 import { INIClass } from "./ini";
 import { CELL_LEPTON } from "./walk";
+import { VocClass } from "./voc";
 
 export const ARMOR_NONE = 0;
 export const ARMOR_WOOD = 1;
@@ -28,6 +29,7 @@ export const FIRE_CANT = 2;
 export const FIRE_REARM = 3;
 export const FIRE_RANGE = 4;
 export const FIRE_AMMO = 5;
+export const FIRE_FACING = 6;
 
 export type BulletTypeClass = {
 	IniName: string;
@@ -44,6 +46,7 @@ export type WarheadTypeClass = {
 	SpreadFactor: number;
 	Modifier: number[];
 	AnimList: string[];
+	InfantryDeath: number;
 };
 
 export type WeaponTypeClass = {
@@ -56,6 +59,7 @@ export type WeaponTypeClass = {
 	Bullet: BulletTypeClass | null;
 	WarheadPtr: WarheadTypeClass | null;
 	MaxSpeed: number;
+	Sound: number[];
 };
 
 export type CombatTables = {
@@ -103,6 +107,30 @@ export function Read_Combat_Tables(ini: INIClass): CombatTables {
 	};
 }
 
+export function Find_Or_Make_Warhead(ini: INIClass, name: string, tables: CombatTables): WarheadTypeClass | null {
+	if (!name || name.toLowerCase() === "none") {
+		return null;
+	}
+	const key = name.toUpperCase();
+	const have = tables.warheads.get(key);
+	if (have) {
+		return have;
+	}
+	const warhead = Read_Warhead(ini, name);
+	tables.warheads.set(key, warhead);
+	return warhead;
+}
+
+export function Combat_Anim(damage: number, warhead: WarheadTypeClass | null): string | null {
+	const DAMAGE_PER_EXPLOSION_ANIM = 25;
+	if (!damage || !warhead || warhead.AnimList.length === 0) {
+		return null;
+	}
+	const count = warhead.AnimList.length;
+	const val = Math.min(damage, DAMAGE_PER_EXPLOSION_ANIM * count - 1);
+	return warhead.AnimList[Math.trunc(val / DAMAGE_PER_EXPLOSION_ANIM)] ?? null;
+}
+
 export function Find_Or_Make_Weapon(ini: INIClass, name: string, tables: CombatTables): WeaponTypeClass | null {
 	if (!name || name.toLowerCase() === "none") {
 		return null;
@@ -140,6 +168,7 @@ function Read_Warhead(ini: INIClass, name: string): WarheadTypeClass {
 			.split(",")
 			.map((part) => part.trim())
 			.filter((part) => part.length > 0),
+		InfantryDeath: ini.get_int(name, "InfDeath", 0),
 	};
 }
 
@@ -177,6 +206,13 @@ function Read_Weapon(
 	if (burst < 1) {
 		burst = 1;
 	}
+	const report = ini
+		.get_string(name, "Report", "")
+		.split(",")
+		.map((part) => part.trim())
+		.filter((part) => part.length > 0)
+		.map((part) => VocClass.From_Name(part))
+		.filter((voc) => voc >= 0);
 	return {
 		IniName: name,
 		Attack: ini.get_int(name, "Damage", 0),
@@ -187,6 +223,7 @@ function Read_Weapon(
 		Bullet: bullet,
 		WarheadPtr: warhead,
 		MaxSpeed: ini.get_int(name, "Speed", 0),
+		Sound: report,
 	};
 }
 
