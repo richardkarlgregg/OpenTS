@@ -95,7 +95,9 @@ import {
 	Play_Movie,
 	Stop_Ingame_Movie,
 } from "./movies";
-import { canvas_mouse, present, type CanvasLabel } from "./present";
+import { canvas_mouse, present, present_gpu, type CanvasLabel } from "./present";
+import { TerrainRenderer, terrain_defaults } from "./terrain-renderer";
+import { TerrainControls } from "./terrain-controls";
 import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
 import { blit_shape, blit_shape_shadow } from "./shp";
 import { Draw_Shroud, ShroudMap } from "./shroud";
@@ -379,14 +381,17 @@ function draw_view(
 	selected: MapSprite[],
 	ghost: { cell: Point2D; legal: boolean } | null,
 	mouse: MouseClass | null,
+	terrain_background?: number,
 ): { frame: DSurface; labels: CanvasLabel[] } {
 	const origin = view_origin(camera);
 	const frame = new DSurface(VIEW_W, VIEW_H);
+	if (terrain_background !== undefined) frame.fill(terrain_background);
 	const heights = new Map<string, number>();
 	const ramps = new Map<string, number>();
 	for (const cell of cells) {
 		heights.set(`${cell.x},${cell.y}`, cell.height);
 		ramps.set(`${cell.x},${cell.y}`, fetch_subtile(tiles, cell.tile, cell.subtile)?.ramp ?? 0);
+		if (terrain_background !== undefined) continue;
 		if (shroud && !shroud.IsMapped(cell.x, cell.y)) {
 			continue;
 		}
@@ -1062,8 +1067,9 @@ function composite_view(
 	radar: RadarMap | null,
 	ghost: { cell: Point2D; legal: boolean } | null,
 	mouse: MouseClass | null,
+	terrain_background?: number,
 ): { frame: DSurface; labels: CanvasLabel[] } {
-	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected, ghost, mouse);
+	const tactical = draw_view(tiles, cells, camera, artwork, cell_lights, palettes, shroud, selected, ghost, mouse, terrain_background);
 	const frame = new DSurface(SCREEN_W, SCREEN_H);
 	frame.blit_from(TAC_X, TAC_Y, tactical.frame);
 	const radar_on = radar?.exists === true;
@@ -1441,7 +1447,7 @@ export async function Show_Tactical(
 	await mouse.One_Time(directory);
 	mouse.Set_Default_Mouse(MOUSE_NORMAL, false);
 	log(
-		`Tactical map ${draw_list.length} cells, theater ${theater || "?"}, ${name}. Edge-scroll or arrows to pan; Escape returns to the menu.`,
+		`Tactical map ${draw_list.length} cells, theater ${theater || "?"}, ${name}. V switches 2D/3D terrain; export and debug controls are above the map. Edge-scroll or arrows to pan; Escape returns to the menu.`,
 	);
 	if (shroud) {
 		log(`Shroud: ${shroud.mapped_count} cells from ${artwork?.lookers.length ?? 0} lookers.`);
@@ -1460,6 +1466,28 @@ export async function Show_Tactical(
 		Bind_Path_Graph(artwork, cell_keys);
 	}
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
+	const { load_tile_assets, export_tile_pack } = await import("./terrain-assets");
+	const tile_assets = await load_tile_assets(theater, draw_list, tiles, log);
+	let terrain: TerrainRenderer | null = null;
+	let terrain_enabled = false;
+	const terrain_settings = terrain_defaults();
+	const prepare_terrain = (): void => {
+		if (terrain) return;
+		try {
+			terrain = new TerrainRenderer(draw_list, tiles, cell_lights, artwork?.theater_palette ?? tiles.palette, terrain_settings, tile_assets);
+			log(`3D terrain ready: ${terrain.mesh.triangles.toLocaleString()} triangles from ${draw_list.length.toLocaleString()} cells.`);
+		} catch (error) {
+			log(`3D terrain unavailable: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	prepare_terrain();
+	const toggle_terrain = (): void => {
+		prepare_terrain();
+		if (terrain) { terrain_enabled = !terrain_enabled; log(terrain_enabled ? "3D terrain" : "Legacy terrain"); }
+		terrain_controls.set_mode(terrain_enabled);
+	};
+	const terrain_controls = new TerrainControls(canvas, terrain_settings, theater, () => { prepare_terrain(); return terrain; }, toggle_terrain,
+		(progress, cancelled) => export_tile_pack(tiles, theater, progress, cancelled));
 	let shift_down = false;
 	const exits: FactoryObject[] = [];
 	let exiting = false;
@@ -1504,23 +1532,29 @@ export async function Show_Tactical(
 				legal: Can_Place_Building(artwork, cell, play, shroud, cell_keys),
 			};
 		}
-		const view = composite_view(
-			tiles,
-			draw_list,
-			camera,
-			artwork,
-			cell_lights,
-			palettes,
-			hud,
-			shroud,
-			artwork?.current_object ?? [],
-			radar,
-			ghost,
-			mouse,
-		);
-		if (mouse.MouseShapes && scroll.near_canvas && !artwork?.input_locked) {
-			mouse.Draw_Mouse(view.frame, hud.palette);
+		const draw = (background?: number) => {
+			const view = composite_view(tiles, draw_list, camera, artwork, cell_lights, palettes, hud, shroud,
+				artwork?.current_object ?? [], radar, ghost, mouse, background);
+			if (mouse.MouseShapes && scroll.near_canvas && !artwork?.input_locked) mouse.Draw_Mouse(view.frame, hud.palette);
+			return view;
+		};
+		if (terrain_enabled && terrain) {
+			try {
+				// Two backgrounds retain software transparency and shadow multiplication over GPU terrain.
+				const black = draw(0), white = draw(0xffff);
+				const rect = canvas.getBoundingClientRect();
+				const scale = Math.min(3840 / SCREEN_W, 2160 / SCREEN_H, Math.max(1, rect.width * window.devicePixelRatio / SCREEN_W));
+				const image = terrain.render(view_origin(camera), SCREEN_W * scale, SCREEN_H * scale, black.frame, white.frame,
+					(x, y) => !shroud || shroud.IsMapped(x, y));
+				present_gpu(canvas, image, black.frame, black.labels);
+				return;
+			} catch (error) {
+				log(error instanceof Error ? error.message : String(error));
+				terrain_enabled = false; terrain.dispose(); terrain = null;
+				terrain_controls.set_mode(false);
+			}
 		}
+		const view = draw();
 		present(canvas, view.frame, view.labels);
 	};
 
@@ -1633,6 +1667,9 @@ export async function Show_Tactical(
 		let busy = false;
 		const finish = (): void => {
 			cancelAnimationFrame(raf);
+			terrain_controls.dispose();
+			terrain?.dispose();
+			terrain = null;
 			Set_Game_Active(false);
 			Set_Sound_View(null);
 			Stop_Ingame_Movie();
@@ -1647,6 +1684,10 @@ export async function Show_Tactical(
 			resolve();
 		};
 		const on_move = (event: MouseEvent): void => {
+			if (event.target instanceof Node && terrain_controls.element.contains(event.target)) {
+				scroll.near_canvas = false;
+				return;
+			}
 			const point = canvas_mouse(canvas, event);
 			const slop = 2;
 			scroll.near_canvas =
@@ -1926,6 +1967,19 @@ export async function Show_Tactical(
 					return;
 				}
 				finish();
+				return;
+			}
+			const target = event.target;
+			if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+			if (event.code === "KeyV" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+				event.preventDefault();
+				if (event.repeat) return;
+				toggle_terrain();
+				return;
+			}
+			if (event.code === "KeyE" && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) {
+				event.preventDefault();
+				if (!event.repeat) void terrain_controls.prepare_export();
 				return;
 			}
 			if (artwork?.input_locked) {

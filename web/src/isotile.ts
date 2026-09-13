@@ -22,6 +22,7 @@ export type TilePreviewColors = {
 };
 
 export type IsoExtraImage = {
+	depth?: Uint8Array;
 	dx: number;
 	dy: number;
 	width: number;
@@ -30,6 +31,8 @@ export type IsoExtraImage = {
 };
 
 export type IsoSubtile = {
+	depth?: Uint8Array;
+	record_height?: number;
 	colors: TilePreviewColors;
 	indices: Uint8Array;
 	extra: IsoExtraImage | null;
@@ -38,6 +41,7 @@ export type IsoSubtile = {
 };
 
 export type TheaterTiles = {
+	names?: string[];
 	palette: Uint16Array;
 	sets: IsoSubtile[][];
 	bridge_set: number;
@@ -69,7 +73,7 @@ function iso_row_span(row: number): { start: number; length: number } {
 	return { start: (ISO_TILE_PIXEL_W - length) >> 1, length };
 }
 
-function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
+export function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	if (bytes.length < 20) {
 		return [];
 	}
@@ -83,10 +87,15 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	const tiles: IsoSubtile[] = [];
 	for (let i = 0; i < count; i++) {
 		const offset = view.getInt32(16 + i * 4, true);
-		if (offset <= 0 || offset + RECORD_HIGH + 2 >= bytes.length) {
+		if (offset <= 0 || offset + RECORD_SIZE > bytes.length) {
 			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0, tile_type: 0 });
 			continue;
 		}
+		const read_depth = (field: number, length: number): Uint8Array | undefined => {
+			const relative = view.getInt32(offset + field, true);
+			const start = offset + relative;
+			return relative >= RECORD_SIZE && start + length <= bytes.length ? bytes.slice(start, start + length) : undefined;
+		};
 		const colors: TilePreviewColors = {
 			low: [bytes[offset + RECORD_LOW]!, bytes[offset + RECORD_LOW + 1]!, bytes[offset + RECORD_LOW + 2]!],
 			high: [bytes[offset + RECORD_HIGH]!, bytes[offset + RECORD_HIGH + 1]!, bytes[offset + RECORD_HIGH + 2]!],
@@ -115,12 +124,14 @@ function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 					width: extra_w,
 					height: extra_h,
 					indices: bytes.slice(start, start + need),
+					depth: (flags & 2) !== 0 ? read_depth(16, need) : undefined,
 				};
 			}
 		}
 		const ramp = bytes[offset + 42] ?? 0;
 		const tile_type = bytes[offset + 41] ?? 0;
-		tiles.push({ colors, indices, extra, ramp, tile_type });
+		tiles.push({ colors, indices, extra, ramp, tile_type, record_height: bytes[offset + 40],
+			depth: (flags & 2) !== 0 ? read_depth(12, ISO_PACKED) : undefined });
 	}
 	return tiles;
 }
@@ -159,6 +170,7 @@ export async function load_theater_tiles(directory: GameDirectory, theater_name:
 
 	const palette = await load_iso_palette(directory, seed.suffix);
 	const sets: IsoSubtile[][] = [];
+	const names: string[] = [];
 	const ini_bytes = await cc_retrieve(directory, `${seed.root}.INI`);
 	if (!ini_bytes) {
 		const empty = { palette, sets, bridge_set: -1, train_bridge_set: -1 };
@@ -196,11 +208,12 @@ export async function load_theater_tiles(directory: GameDirectory, theater_name:
 			if (!packed && seed.mm_suffix.length > 0) {
 				packed = await cc_retrieve(directory, `${stem}.${seed.mm_suffix}`);
 			}
+			names.push(`${stem}.${seed.suffix}`);
 			sets.push(packed ? parse_iso_tile_set(packed) : []);
 		}
 	}
 
-	const tiles = { palette, sets, bridge_set, train_bridge_set };
+	const tiles = { palette, sets, names, bridge_set, train_bridge_set };
 	cache.set(seed.name, tiles);
 	return tiles;
 }

@@ -30,6 +30,8 @@ export function last_presented(): DSurface | null {
 
 export function present(canvas: HTMLCanvasElement, surface: DSurface, labels?: CanvasLabel[]): void {
 	last_surface = surface;
+	canvas.dataset.logicalWidth = String(surface.width);
+	canvas.dataset.logicalHeight = String(surface.height);
 	if (canvas.width !== surface.width || canvas.height !== surface.height) {
 		canvas.width = surface.width;
 		canvas.height = surface.height;
@@ -49,6 +51,10 @@ export function present(canvas: HTMLCanvasElement, surface: DSurface, labels?: C
 		dest[o + 3] = 255;
 	}
 	ctx.putImageData(image, 0, 0);
+	draw_labels(ctx, labels);
+}
+
+function draw_labels(ctx: CanvasRenderingContext2D, labels?: CanvasLabel[]): void {
 	if (!labels || labels.length === 0) {
 		return;
 	}
@@ -86,10 +92,24 @@ export function present(canvas: HTMLCanvasElement, surface: DSurface, labels?: C
 	}
 }
 
+export function present_gpu(canvas: HTMLCanvasElement, image: HTMLCanvasElement, logical: DSurface, labels?: CanvasLabel[]): void {
+	last_surface = logical;
+	canvas.dataset.logicalWidth = String(logical.width);
+	canvas.dataset.logicalHeight = String(logical.height);
+	if (canvas.width !== image.width || canvas.height !== image.height) {
+		canvas.width = image.width; canvas.height = image.height;
+	}
+	const ctx = canvas.getContext("2d");
+	if (!ctx) throw new Error("Canvas 2D is not available.");
+	ctx.drawImage(image, 0, 0);
+	ctx.save(); ctx.scale(image.width / logical.width, image.height / logical.height);
+	draw_labels(ctx, labels); ctx.restore();
+}
+
 export function canvas_mouse(canvas: HTMLCanvasElement, event: MouseEvent): { x: number; y: number } {
 	const rect = canvas.getBoundingClientRect();
 	return {
-		x: Math.floor((event.clientX - rect.left) * (canvas.width / rect.width)),
-		y: Math.floor((event.clientY - rect.top) * (canvas.height / rect.height)),
+		x: Math.floor((event.clientX - rect.left) * (Number(canvas.dataset.logicalWidth ?? canvas.width) / rect.width)),
+		y: Math.floor((event.clientY - rect.top) * (Number(canvas.dataset.logicalHeight ?? canvas.height) / rect.height)),
 	};
 }

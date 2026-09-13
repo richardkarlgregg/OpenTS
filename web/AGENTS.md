@@ -4,7 +4,7 @@ These instructions apply to `web/` and supplement the repository-root
 `AGENTS.md`.
 
 This tree is a TypeScript source port of the engine in `code/`. It runs in
-the browser on a 2D canvas. It is experimental. Visual Studio Win32 remains
+the browser with a software canvas and optional WebGL2 terrain. It is experimental. Visual Studio Win32 remains
 the supported product; do not describe a successful `npm` run as a playable
 game.
 
@@ -17,8 +17,9 @@ game.
 - Load retail data only from a user-picked folder. Chromium refuses
   `showDirectoryPicker` on `Program Files` (including the Steam install), so
   the page uses a `<input webkitdirectory>` file list instead.
-- Draw the software 565 frame to canvas `ImageData`. Remastered GPU terrain
-  and WebGL wait until single-player works.
+- Keep the legacy software 565 renderer. V toggles the independent WebGL2
+  terrain renderer; see `TERRAIN.md`. Keep gameplay math and map formats
+  independent of this presentation choice.
 - After MIX files are indexed the page runs the graphical menu from
   `NewMenu.INI` when `GMENU.MIX` is present, otherwise the old
   `IDD_MAIN_MENU` dialog from `language.rc`. New Campaign runs
@@ -84,8 +85,9 @@ game.
   auto-acquires in `ThreatRange`, `Sleep` does not, `Hunt` is map-wide
   `Greatest_Threat` then `Approach_Target`. Computer idle after a team is
   `Guard` (`Enter_Idle_Mode`). `ALL_HUNT` pulls them off teams and hunts.
-  `LOCK_INPUT` hides the mouse and ignores clicks, keys, and edge
-  scroll until `UNLOCK_INPUT`; the sidebar still draws, and cameos appear
+  `LOCK_INPUT` hides the mouse and ignores gameplay clicks, keys, and edge
+  scroll until `UNLOCK_INPUT`; terrain graphics and export controls remain
+  available (see `TERRAIN.md`). The sidebar still draws, and cameos appear
   once a factory is owned. Scripted teams still run. A campaign
   start posts `TXT_DIFFICULTY_LEVEL` then `TEXT_TRIGGER` lines at the
   top of the tactical view. Drop-pod covering fire (`2 * DropPodWeapon`)
