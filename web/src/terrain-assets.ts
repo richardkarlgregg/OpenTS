@@ -6,13 +6,13 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { zipSync, strToU8 } from "fflate";
 import { fetch_subtile, type TheaterTiles } from "./isotile";
-import { terrain_image } from "./terrain-art";
+import { terrain_image, tile_art } from "./terrain-art";
 import { TERRAIN_LEVEL, type TerrainCell } from "./terrain-mesh";
-import { tile_key, tile_template, type TileAsset, type TileAssets } from "./terrain-tiles";
+import { tile_key, tile_prototype, type TileAsset, type TileAssets } from "./terrain-tiles";
 import { unpack_hicolor } from "./surface";
 
-function original_image(tiles: TheaterTiles, tile: number, subtile: number): HTMLCanvasElement {
-	const source = terrain_image(fetch_subtile(tiles,tile,subtile)!);
+function original_image(tiles: TheaterTiles, tile: number, subtile: number, mesh_texture=false): HTMLCanvasElement {
+	const source = mesh_texture ? tile_art(tiles,tile,subtile)! : terrain_image(fetch_subtile(tiles,tile,subtile)!);
 	const canvas=document.createElement("canvas"); canvas.width=source.width; canvas.height=source.height;
 	const ctx=canvas.getContext("2d")!, pixels=ctx.createImageData(source.width,source.height);
 	for(let i=0;i<source.indices.length;i++) { const index=source.indices[i]!; pixels.data.set([...unpack_hicolor(tiles.palette[index]!),index?255:0],i*4); }
@@ -23,10 +23,20 @@ const png = (canvas:HTMLCanvasElement):Promise<Uint8Array> => new Promise((resol
 },"image/png"));
 
 export async function export_tile_glb(tiles:TheaterTiles,tile:number,subtile:number):Promise<ArrayBuffer> {
-	const data=tile_template(fetch_subtile(tiles,tile,subtile)), positions:number[]=[],normals:number[]=[],uv:number[]=[];
-	for(let i=0;i<data.length;i+=10) { positions.push(data[i]!,data[i+2]!*TERRAIN_LEVEL,-data[i+1]!); normals.push(data[i+7]!,data[i+9]!,-data[i+8]!); uv.push(data[i+3]!,data[i+4]!); }
+	const data=tile_prototype(tiles,tile,subtile), positions:number[]=[],normals:number[]=[],uv:number[]=[];
+	const indices:number[]=[], shared=new Map<string,number>();
+	for(let i=0;i<data.length;i+=10) {
+		const key=[...data.slice(i,i+5),...data.slice(i+7,i+10)].join(",");
+		let vertex=shared.get(key);
+		if(vertex===undefined) {
+			vertex=positions.length/3; shared.set(key,vertex);
+			positions.push(data[i]!,data[i+2]!*TERRAIN_LEVEL,-data[i+1]!); normals.push(data[i+7]!,data[i+9]!,-data[i+8]!); uv.push(data[i+3]!,data[i+4]!);
+		}
+		indices.push(vertex);
+	}
 	const geometry=new BufferGeometry(); geometry.setAttribute("position",new Float32BufferAttribute(positions,3)); geometry.setAttribute("normal",new Float32BufferAttribute(normals,3)); geometry.setAttribute("uv",new Float32BufferAttribute(uv,2));
-	const map=new CanvasTexture(original_image(tiles,tile,subtile)); map.flipY=false; map.colorSpace=SRGBColorSpace;
+	geometry.setIndex(indices);
+	const map=new CanvasTexture(original_image(tiles,tile,subtile,true)); map.flipY=false; map.colorSpace=SRGBColorSpace;
 	const material=new MeshStandardMaterial({map,side:DoubleSide,alphaTest:0.5,roughness:1,metalness:0});
 	const mesh=new Mesh(geometry,material); mesh.name=tile_key(tiles,tile,subtile); mesh.userData={opentsTile:mesh.name,origin:"cell corner",heightLevel:TERRAIN_LEVEL};
 	try { return await new GLTFExporter().parseAsync(mesh,{binary:true}) as ArrayBuffer; }
@@ -42,11 +52,13 @@ export async function export_tile_pack(tiles:TheaterTiles,theater:string,progres
 		entries[`${base}.png`]=await png(original_image(tiles,item.tile,item.subtile));
 		entries[`${base}.glb`]=new Uint8Array(await export_tile_glb(tiles,item.tile,item.subtile));
 		const tile=fetch_subtile(tiles,item.tile,item.subtile)!;
-		entries[`${base}.json`]=strToU8(JSON.stringify({version:1,theater,key,ramp:tile.ramp,recordHeight:tile.record_height??0,
-			image:{left:terrain_image(tile).left,top:terrain_image(tile).top},triangles:tile_template(tile).length/30},null,2));
+		const texture=tile_art(tiles,item.tile,item.subtile)!;
+		entries[`${base}.json`]=strToU8(JSON.stringify({version:2,theater,key,ramp:tile.ramp,recordHeight:tile.record_height??0,location:tile.location,
+			image:{left:terrain_image(tile).left,top:terrain_image(tile).top},meshTexture:{left:texture.left,top:texture.top,width:texture.width,height:texture.height},
+			wallOwnership:"higher cell; TMP internal neighbors",triangles:tile_prototype(tiles,item.tile,item.subtile).length/30},null,2));
 		progress((i+1)/list.length); if(i%8===0)await new Promise(resolve=>setTimeout(resolve,0));
 	}
-	entries["README.txt"]=strToU8("Import a tile GLB into Blender. Keep its origin, scale and placement; one cell side is one unit. glTF Y is up; Blender converts to Z-up. Edit the mesh, UVs, Base Color and Normal Map. Export selected tile objects as glTF Binary (.glb), with materials and images embedded, no compression or animations. Save at the same tiles/<theater>/<TMP filename>/<subtile>.glb path inside web/public/remaster/. Mission loading discovers files automatically. PNG files are the original indexed artwork expanded to RGBA. JSON files record tile identity and artwork offsets. Do not add the map's elevation to the asset: mission placement supplies it. These are low-poly starting meshes; cliffs and hidden surfaces need modelling.\n");
+	entries["README.txt"]=strToU8("Import a tile GLB into Blender. Keep its origin, scale and placement; one cell side is one unit. glTF Y is up; Blender converts to Z-up. Edit the mesh, UVs, Base Color and Normal Map. Export selected tile objects as glTF Binary (.glb), with materials and images embedded, no compression or animations. Save at the same tiles/<theater>/<TMP filename>/<subtile>.glb path inside web/public/remaster/. Mission loading discovers files automatically. PNG files are the original indexed artwork expanded to RGBA. JSON files record tile identity and artwork offsets. Do not add the map's elevation to the asset: mission placement supplies it. Ground uses two triangles. Cliff walls belong to the higher cell and join known neighbors inside the TMP stamp; model unknown external boundaries as needed. GLB textures combine neighboring TMP records and extend color into unpainted regions; the separate PNG preserves the original image. Re-export kits to obtain updated starter geometry.\n");
 	if(cancelled())throw new Error("Tile export cancelled");
 	return new Blob([zipSync(entries,{level:0}) as Uint8Array<ArrayBuffer>],{type:"application/zip"});
 }

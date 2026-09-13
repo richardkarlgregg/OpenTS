@@ -31,6 +31,9 @@ export type IsoExtraImage = {
 };
 
 export type IsoSubtile = {
+	// SubTile_Index(x,y) = x + MapWidth*y (code/isotype.h). Empty TMP slots are absent.
+	location?: { x: number; y: number };
+	absent?: boolean;
 	depth?: Uint8Array;
 	record_height?: number;
 	colors: TilePreviewColors;
@@ -88,7 +91,7 @@ export function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 	for (let i = 0; i < count; i++) {
 		const offset = view.getInt32(16 + i * 4, true);
 		if (offset <= 0 || offset + RECORD_SIZE > bytes.length) {
-			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0, tile_type: 0 });
+			tiles.push({ colors: { ...FALLBACK_COLORS }, indices: new Uint8Array(ISO_PACKED), extra: null, ramp: 0, tile_type: 0, absent: true });
 			continue;
 		}
 		const read_depth = (field: number, length: number): Uint8Array | undefined => {
@@ -130,7 +133,7 @@ export function parse_iso_tile_set(bytes: Uint8Array): IsoSubtile[] {
 		}
 		const ramp = bytes[offset + 42] ?? 0;
 		const tile_type = bytes[offset + 41] ?? 0;
-		tiles.push({ colors, indices, extra, ramp, tile_type, record_height: bytes[offset + 40],
+		tiles.push({ colors, indices, extra, ramp, tile_type, record_height: bytes[offset + 40], location: { x: i % map_w, y: Math.floor(i / map_w) },
 			depth: (flags & 2) !== 0 ? read_depth(12, ISO_PACKED) : undefined });
 	}
 	return tiles;

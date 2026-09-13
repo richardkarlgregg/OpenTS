@@ -163,6 +163,7 @@ function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanva
 	const pages: HTMLCanvasElement[] = [];
 	const normals: (HTMLCanvasElement|null)[] = [];
 	const slots: AtlasSlot[] = [];
+	const shared = new WeakMap<Uint8Array, AtlasSlot>();
 	let x = 2, y = 2, row = 0, page_index = 0;
 	const new_page = (): void => {
 		const canvas = document.createElement("canvas"); canvas.width = canvas.height = ATLAS_SIZE;
@@ -175,7 +176,9 @@ function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanva
 			pages.push(material.image); normals.push(material.normal_image??null); continue;
 		}
 		const extra = material.extra ? material.tile?.extra : null;
-		const source = extra ?? (material.tile ? terrain_image(material.tile) : null);
+		const source = material.source ?? extra ?? (material.tile ? terrain_image(material.tile) : null);
+		const cached = source && shared.get(source.indices);
+		if (cached) { slots.push(cached); continue; }
 		const width = source?.width ?? 48, height = source?.height ?? 24;
 		if (x + width + 2 > ATLAS_SIZE) { x = 2; y += row + 4; row = 0; }
 		if (y + height + 2 > ATLAS_SIZE) new_page();
@@ -189,7 +192,8 @@ function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanva
 			image.data.set([...rgb, source && index === 0 ? 0 : 255], dest);
 		}
 		ctx.putImageData(image, x - 2, y - 2);
-		slots.push({ page: page_index, x, y, width, height });
+		const slot = { page: page_index, x, y, width, height };
+		slots.push(slot); if (source) shared.set(source.indices,slot);
 		x += width + 4; row = Math.max(row, height);
 	}
 	return { pages, slots, normals };

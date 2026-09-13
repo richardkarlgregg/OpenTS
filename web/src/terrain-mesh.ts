@@ -2,11 +2,11 @@
 // Copyright 2026 OpenTS contributors
 
 import { fetch_subtile, type IsoSubtile, type TheaterTiles } from "./isotile";
-import { terrain_image, terrain_uv, TerrainCoverage } from "./terrain-art";
+import { terrain_image, terrain_uv, TerrainCoverage, type TerrainImage } from "./terrain-art";
 
 export type TerrainCell = { x: number; y: number; height: number; tile: number; subtile: number };
 export type TerrainVertex = [number, number, number];
-export type TerrainMaterial = { key: string; tile: IsoSubtile | null; extra: boolean; image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement };
+export type TerrainMaterial = { key: string; tile: IsoSubtile | null; extra: boolean; source?: TerrainImage; image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement };
 export type TerrainPart = { kind: "ground" | "closure" | "relief"; material: number; vertices: Float32Array; cell: TerrainCell };
 export type TerrainMesh = { materials: TerrainMaterial[]; parts: TerrainPart[]; triangles: number };
 

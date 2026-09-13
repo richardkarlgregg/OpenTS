@@ -106,16 +106,16 @@ for(let y=0;y<painted.height;y++)for(let x=0;x<painted.width;x++)if(painted.indi
 }
 console.log('Texture regressions passed: slope projection, extra-image offsets, transparent palette index zero, and full painted-pixel coverage.');
 
-const { tile_template, tile_key, build_tile_map } = require('../src/terrain-tiles.ts');
+const { tile_template, tile_prototype, tile_key, build_tile_map } = require('../src/terrain-tiles.ts');
 for(let ramp=0;ramp<=20;ramp++) {
-	const vertices=tile_template(tile(ramp)); assert.ok(vertices.length/30<=10 && vertices.length>0);
+	const vertices=tile_template(tile(ramp)); assert.equal(vertices.length/30,2);
 	for(let i=0;i<vertices.length;i+=30) {
 		const x=(vertices[i]+vertices[i+10]+vertices[i+20])/3, y=(vertices[i+1]+vertices[i+11]+vertices[i+21])/3;
 		const z=(vertices[i+2]+vertices[i+12]+vertices[i+22])/3;
-		if(ramp!==13 && x>=0&&x<=1&&y>=0&&y<=1)assert.ok(Math.abs(z-terrain_height(ramp,x,y))<1e-6,`Low-poly ramp ${ramp} crosses its crease`);
+		assert.ok(Math.abs(z-terrain_height(ramp,x,y))<1e-6,`Low-poly ramp ${ramp} crosses its crease`);
 	}
 }
-assert.ok(tile_template({...tile(0),extra}).length/30<=18,'Extra artwork has a bounded low-poly mesh');
+assert.equal(tile_template({...tile(0),extra}).length/30,2,'Extra-image pixels must never create geometry');
 const low=build_tile_map(large,tiles);assert.ok(low.triangles<=large.length*10);
 const named={...tiles,names:['CLEAR01.TEM']};
 assert.equal(tile_key(named,0,0),'clear01.tem/0');
@@ -126,3 +126,47 @@ for(let i=0;i<prototype.length;i+=10)for(const [p,c] of [[placed.parts[0],cell(2
 	assert.equal(p.vertices[i],Math.fround(prototype[i]+c.x));assert.equal(p.vertices[i+1],Math.fround(prototype[i+1]+c.y));assert.equal(p.vertices[i+2],Math.fround(prototype[i+2]+c.height));
 }
 console.log(`Tile workflow checks passed: 21 low-poly ramps, stable identities, shared materials, placement, ${low.triangles} triangles for ${large.length} cells.`);
+
+
+assert.deepEqual(decoded.location,{x:0,y:0},'TMP grid location is retained');
+const flatGrid=build_tile_map(Array.from({length:100},(_,i)=>cell(i%10,Math.floor(i/10))),tiles);
+assert.equal(flatGrid.triangles,200,'Flat grid has exactly two triangles per cell');
+assert.equal(flatGrid.parts.filter(p=>p.kind==='closure').length,0,'No hidden interior walls on flat terrain');
+for(let ramp=0;ramp<=20;ramp++)for(let i=0,v=tile_template(tile(ramp));i<v.length;i+=10){
+ assert.ok(v[i]>=0&&v[i]<=1&&v[i+1]>=0&&v[i+1]<=1,'Ground vertices stay inside the cell');
+ assert.ok(v[i+9]>0,'Ground normal points up');
+}
+for(const axis of [0,1])for(let a=0;a<=20;a++)for(let b=0;b<=20;b++)for(const elevation of [-2,0,2]) {
+ const c0=cell(0,0,0,a),c1=cell(axis===0?1:0,axis===1?1:0,elevation,b);
+ const pair=build_tile_map([c0,c1],tiles), sides=pair.parts.filter(p=>p.kind==='closure');
+ const heights=t=>axis===0?[terrain_height(a,1,t),elevation+terrain_height(b,0,t)]:[terrain_height(a,t,1),elevation+terrain_height(b,t,0)];
+ let area=0;
+ for(const side of sides)for(let i=0,v=side.vertices;i<v.length;i+=30) {
+  const points=[0,10,20].map(k=>[v[i+k],v[i+k+1],v[i+k+2]]);
+  for(const [k,p] of points.entries()) {
+   assert.equal(p[axis],1,'Cliff faces remain on the shared grid boundary');
+   const t=p[1-axis], h=heights(t);
+   assert.ok(Math.min(...h)-1e-6<=p[2]&&p[2]<=Math.max(...h)+1e-6,'Wall endpoints join the two ground edges');
+   assert.ok(Math.abs(v[i+k*10+9])<1e-6&&Math.abs(v[i+k*10+7+axis])>.999,'Cliff normal is horizontal and aligned to a cell axis');
+  }
+  const [p,q,r]=points;area+=Math.abs((q[1-axis]-p[1-axis])*(r[2]-p[2])-(r[1-axis]-p[1-axis])*(q[2]-p[2]))/2;
+ }
+ const h0=heights(0),h1=heights(1),d0=h0[0]-h0[1],d1=h1[0]-h1[1];
+ const expected=d0*d1<0?(d0*d0+d1*d1)/(2*Math.abs(d1-d0)):(Math.abs(d0)+Math.abs(d1))/2;
+ assert.ok(Math.abs(area-expected)<1e-5,`Cliff must cover each height gap once: axis ${axis}, ramps ${a}/${b}, offset ${elevation}`);
+}
+const high={...tile(0),location:{x:0,y:0},record_height:4};
+const lowTile={...tile(0),location:{x:1,y:0},record_height:0,extra:{dx:0,dy:-48,width:24,height:60,indices:new Uint8Array(1440).fill(2)}};
+const stamp={...tiles,sets:[[high,lowTile]],names:['CLIFF01.TEM']};
+const proto=tile_prototype(stamp,0,0);
+assert.equal(proto.length/30,4,'High cliff prototype includes its two wall triangles');
+assert.equal(tile_prototype(stamp,0,1).length/30,2,'Lower neighbor does not duplicate the wall');
+const assembled=build_tile_map([cell(0,0,4),{...cell(1,0),subtile:1}],stamp);
+const highParts=assembled.parts.filter(p=>p.cell.x===0);
+const assembledVertices=highParts.flatMap(p=>Array.from(p.vertices));
+for(let i=0;i<proto.length;i++) if(i%10<3||i%10>=7) assert.ok(Math.abs(assembledVertices[i]-(proto[i]+(i%10===2?4:0)))<1e-6,'TMP export and map assembly geometry agree');
+const separateFiles={...tiles,sets:[[{...high}],[{...lowTile,location:{x:0,y:0}}]],names:['CLIFFTOP.TEM','CLIFFFACE.TEM']};
+const corner=build_tile_map([cell(0,0,4),cell(1,0,0,1)],separateFiles);
+const cliffImage=corner.materials[corner.parts.find(p=>p.kind==='closure').material].source;
+assert.equal(cliffImage.indices[(42-cliffImage.top)*cliffImage.width+36-cliffImage.left],2,'Cliff face uses extra artwork from a different neighboring TMP file');
+console.log('Clean topology checks passed: 2,646 ramp/height boundary pairs, exact shared-edge coverage, cardinal cliff normals, no flat-grid walls, TMP cliff export parity.');

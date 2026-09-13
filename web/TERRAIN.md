@@ -43,8 +43,9 @@ time. Mission loading refreshes it and requests current asset revisions.
 One horizontal cell side is one unit. The origin is the cell corner, and the
 opposite corner is `(1, 1)` in the two map axes. Cell elevation is supplied by
 the map; do not bake a mission's elevation into a replacement.
-Generated artwork outlines can extend beyond the logical cell boundary.
-Keep the cell origin; do not rescale each model to fit its bounding box.
+Generated ground vertices stay within the cell boundary. Cliff walls descend
+from that boundary. Keep the cell origin; do not rescale each model to fit
+its bounding box.
 
 In GLB coordinates, X follows the first cell axis, Y is up and negative Z
 follows the second cell axis. One height level is `sqrt(1/6)` units. Blender's
@@ -68,26 +69,53 @@ small because many cells can repeat one tile.
 
 ## Generated meshes and density
 
-`src/terrain-tiles.ts` builds reusable templates in local tile coordinates.
-Map data supplies the tile identity and placed height. TMP ramp metadata
-supplies the corner/crease heights. The two logical ramp triangles define
-the ground planes. An eight-corner outline follows the painted base diamond;
-clipping it at the ramp crease takes at most ten ground triangles. TMP extra
-artwork adds at most eight triangles on a coarse depth grid. A flat tile
-uses eight triangles, including its raster boundary. There is no geometry per
-pixel. Edge-on ramp artwork uses a coarse reference surface alongside its
-logical ground faces.
+`src/terrain-tiles.ts` uses four ground corners and two triangles per cell.
+Ramps split along the crease defined by `CellClass::Get_Height` in
+`code/cell.cpp`. Ramps 17–20 use its half-level ground plane. A steep ramp
+may be edge-on to the fixed camera; no extra camera-facing mesh is invented.
+GLBs share matching position/UV/normal vertices, so a flat tile has four
+vertices and six triangle indices. A wireframe still shows the diagonal
+needed to triangulate a quad.
 
-These are editable starting shapes. Raster tile edges and cliff silhouettes
-will not match the old per-pixel reconstruction exactly. TMP depth is an
-approximation, and 2D artwork cannot reveal hidden cliff backs, tunnel
-interiors or bridge undersides. Model those surfaces in Blender. The original
-PNG is provided independently so its silhouette remains available as reference.
+Neighboring map cells provide both endpoint heights of every shared edge.
+Equal heights produce no wall. A height discontinuity produces a vertical
+quad, or a triangle where the gap tapers to zero. Crossing slopes split the
+wall at their intersection. The higher cell owns each section exactly once.
+Wall planes align with the X or Y cell axis, connecting the upper and lower
+ground edges. There are no pixel-outline strips, depth grids, internal walls
+on flat ground, or horizontal slices through cliff faces. Map boundaries
+remain open; no arbitrary skirt extends below the map.
 
-Templates are cached by loaded subtile object. A replacement is parsed once
-per unique identity at mission load, and all its occurrences share materials
-and image pages. Render batches combine geometry by map chunk and material.
-Persistent map caching and GPU instancing are not implemented yet.
+`code/isotype.h` defines the TMP slot order as `x + MapWidth*y`.
+`IsometricTileClass::Mark` in `code/isotile.cpp` stamps each record's height
+and ramp into its cell. The browser retains those record locations and
+heights. Tile-kit GLBs include walls against known neighbors within that TMP
+stamp. Unknown neighbors outside the stamp have no invented height. A
+replacement owns its complete tile geometry, including cliff walls; mission
+loading does not add generated walls to that replacement. Match the adjoining
+terrain when modelling replacement boundaries. Existing GLBs keep their old
+geometry; export a new kit to obtain these revised starter meshes.
+
+TMP extra imagery contributes color, not extra geometry. `Draw_Tile` in
+`code/isotype.cpp` uses Z data for painter/depth ordering; it is not a ground
+height field. The starter GLB texture combines the TMP's records in their
+original projected positions. Runtime cliff textures also include nearby map
+artwork where a corner spans several TMP files. This is fixed-camera color
+projection onto the connected walls. Empty texels are color-extended to keep
+generated terrain solid. The separate original PNG keeps its transparency.
+JSON version 2 records both original-image and mesh-texture offsets.
+
+These meshes provide the game's logical ground and grid-aligned cliffs.
+Rock protrusions, hidden backs, tunnel interiors and bridge undersides need
+modelling in Blender: the 2D art does not define their complete geometry.
+Artwork overhanging a logical edge will not have an identical silhouette.
+
+TMP stamp textures are cached and share atlas slots. Cliff color patches are
+built once for the mission from a spatial index of nearby tile images. A
+replacement is parsed once per unique identity at mission load; repeated
+instances share materials and image pages. Render batches combine geometry
+by map chunk and material. Persistent map caching and GPU instancing are not
+implemented yet.
 
 The previous dense projection builder remains in `src/terrain-mesh.ts` for
 its geometry helpers and regression comparisons; it is not the runtime
@@ -106,7 +134,7 @@ Settings last for the tactical session and do not modify exported assets.
 Terrain shadows use a 2048×2048 depth map fitted to the complete map, with
 alpha masking, nine depth comparisons and receiver-plane depth correction.
 Sun changes rebuild it; camera movement reuses it. Large maps have lower
-shadow detail. Shadows from generated cliff relief are approximate.
+shadow detail. Shadows follow the generated ground and connected cliff walls.
 
 Objects, overlays, selections, shroud and the sidebar retain their software
 rendering. Buildings and units keep their sprite shadows. The software

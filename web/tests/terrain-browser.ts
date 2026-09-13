@@ -49,7 +49,7 @@ const exported = renderer.build_gltf("SYNTHETIC");
 if (!exported.meshes.length || exported.nodes.length !== renderer.mesh.parts.length || !exported.images[0]!.uri.startsWith("data:image/png")) throw new Error("Terrain glTF scene or embedded texture missing");
 for (const buffer of exported.buffers) if (atob(buffer.uri.split(",")[1]!).length !== buffer.byteLength) throw new Error("Terrain glTF buffer length");
 renderer.dispose();
-// Palette zero is a transparency marker even when the theater paints it blue.
+// Original palette zero must never become blue holes in solid generated terrain.
 test_palette[0] = build_hicolor_pixel(0, 0, 255);
 const transparent_tile = { ...art[3]![0]!, indices: new Uint8Array(576) };
 const transparent = new TerrainRenderer([{ x: 1, y: 1, height: 0, tile: 0, subtile: 0 }],
@@ -57,9 +57,14 @@ const transparent = new TerrainRenderer([{ x: 1, y: 1, height: 0, tile: 0, subti
 black.fill(0); white.fill(0xffff);
 ctx.drawImage(transparent.render({ x: -100, y: -76 }, 1280, 800, black, white, () => true), 0, 0, 640, 400);
 const pixels = ctx.getImageData(0, 0, 640, 400).data;
-for (let i = 0; i < pixels.length; i += 4) if (pixels[i] || pixels[i + 1] || pixels[i + 2]) throw new Error("Palette-zero slope texels must remain transparent");
+let terrain_pixels=0;
+for (let i = 0; i < pixels.length; i += 4) {
+ if (pixels[i+2]!>100 && pixels[i]===0 && pixels[i+1]===0) throw new Error("Palette-zero blue marker was rendered");
+ if (pixels[i+1]!>50) terrain_pixels++;
+}
+if(terrain_pixels<100) throw new Error("Unpainted slope lost its solid geometry");
 transparent.dispose();
-log("PASS: blue palette-zero markers are transparent on slopes.");
+log("PASS: slopes stay solid without drawing blue palette-zero markers.");
 log("PASS: WebGL2 terrain, hidden cells, foreground compositing, and 640/960/3456×2160 resizing.");
 const shadow_cells = [];
 for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) shadow_cells.push({ x, y, height: x === 4 && y === 4 ? 6 : 0, tile: 0, subtile: 0 });
