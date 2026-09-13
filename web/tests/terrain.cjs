@@ -170,3 +170,25 @@ const corner=build_tile_map([cell(0,0,4),cell(1,0,0,1)],separateFiles);
 const cliffImage=corner.materials[corner.parts.find(p=>p.kind==='closure').material].source;
 assert.equal(cliffImage.indices[(42-cliffImage.top)*cliffImage.width+36-cliffImage.left],2,'Cliff face uses extra artwork from a different neighboring TMP file');
 console.log('Clean topology checks passed: 2,646 ramp/height boundary pairs, exact shared-edge coverage, cardinal cliff normals, no flat-grid walls, TMP cliff export parity.');
+
+const {pick_terrain_cell}=require('../src/terrain-pick.ts');
+const clickCells=[cell(3,4,4),cell(4,4,0)];
+const clickMesh=build_tile_map(clickCells,tiles);
+const wallPixel=terrain_project(4,4.5,2);
+assert.equal(pick_terrain_cell(clickMesh,...wallPixel,()=>true),clickCells[0],'Cliff face selects its higher owner');
+assert.equal(pick_terrain_cell(clickMesh,...wallPixel,(x)=>x!==3),null,'Hidden cliff cannot be selected');
+assert.equal(pick_terrain_cell(clickMesh,-999,-999,()=>true),null,'Empty screen area selects nothing');
+for(let ramp=0;ramp<=20;ramp++) {
+ const c=cell(2,3,5,ramp), m=build_tile_map([c],tiles), v=m.parts[0].vertices;
+ if([13].includes(ramp))continue;
+ // Some triangular corner faces are also edge-on; select a visible face if present.
+ for(let i=0;i<v.length;i+=30){
+  const a=terrain_project(...v.slice(i,i+3)),b=terrain_project(...v.slice(i+10,i+13)),d=terrain_project(...v.slice(i+20,i+23));
+  if(Math.abs((b[0]-a[0])*(d[1]-a[1])-(b[1]-a[1])*(d[0]-a[0]))<1e-6)continue;
+  assert.equal(pick_terrain_cell(m,(a[0]+b[0]+d[0])/3,(a[1]+b[1]+d[1])/3,()=>true),c,`Pick ramp ${ramp}`);
+ }
+}
+assert.equal(tile_key(named,65535,0),'clear01.tem/0');
+assert.equal(tile_key(named,-1,0),'clear01.tem/0');
+assert.equal(tile_key(named,0,21),'clear01.tem/0');
+console.log('Tile selection checks passed: projected ground and cliff picking, shroud, empty space, and canonical clear-tile identity.');

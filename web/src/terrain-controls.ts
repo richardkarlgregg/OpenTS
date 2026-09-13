@@ -3,6 +3,8 @@
 
 import { terrain_defaults, type TerrainRenderer, type TerrainSettings } from "./terrain-renderer";
 
+type TileExport = { name:string; path:string; export:(progress:(value:number)=>void,cancelled:()=>boolean)=>Promise<Blob> };
+
 export class TerrainControls {
 	readonly element = document.createElement("section");
 	private readonly mode = document.createElement("button");
@@ -11,6 +13,8 @@ export class TerrainControls {
 	private readonly save = document.createElement("a");
 	private readonly status = document.createElement("span");
 	private readonly debug = document.createElement("details");
+	private readonly tile_menu = document.createElement("div");
+	private readonly selected_export = document.createElement("button");
 	private readonly refresh: (() => void)[] = [];
 	private url = "";
 	private exporting = false;
@@ -54,8 +58,12 @@ export class TerrainControls {
 		const reset = document.createElement("button"); reset.type = "button"; reset.textContent = "Reset lighting and debug";
 		reset.onclick = () => { Object.assign(settings, terrain_defaults()); this.refresh.forEach(fn => fn()); };
 		fields.append(reset); this.debug.append(summary, note, fields); this.element.append(bar, this.debug);
+		this.tile_menu.className="terrain-tile-menu"; this.tile_menu.hidden=true;
+		this.tile_menu.setAttribute("role","dialog"); this.tile_menu.setAttribute("aria-label","Terrain tile");
+		this.element.append(this.tile_menu);
 		// Debug controls must not issue tactical keyboard or mouse commands.
 		for (const event of ["keydown", "keyup", "mousedown", "mouseup"]) this.element.addEventListener(event, e => {
+			if(e instanceof KeyboardEvent && e.key==="Escape" && this.menu_open) { e.preventDefault(); this.close_tile(); }
 			if (e instanceof KeyboardEvent && (e.code === "KeyV" || (e.code === "KeyE" && e.ctrlKey && e.shiftKey))) return;
 			e.stopPropagation();
 		});
@@ -63,13 +71,34 @@ export class TerrainControls {
 	}
 
 	set_mode(enabled: boolean): void {
+		this.close_tile();
 		this.mode.textContent = enabled ? "Remaster: on (V)" : "Remaster: off (V)";
 		this.mode.setAttribute("aria-pressed", String(enabled));
 	}
 
-	async prepare_export(tiles = false): Promise<void> {
+	get menu_open(): boolean { return !this.tile_menu.hidden; }
+
+	close_tile(): void { this.tile_menu.hidden=true; }
+
+	show_tile(name:string, path:string, x:number, y:number, exporter:TileExport["export"]): void {
+		if(this.disposed) return;
+		const title=document.createElement("strong"), destination=document.createElement("p"), help=document.createElement("p"), close=document.createElement("button");
+		title.textContent=name; destination.textContent=`Save edited GLB to: ${path}`;
+		help.textContent="Keep the tile origin and scale. Reload the mission to use it for all matching tiles in Remaster mode.";
+		const selection:TileExport={name,path,export:exporter};
+		this.selected_export.type="button"; this.selected_export.textContent="Export this tile (PNG + GLB)";
+		this.selected_export.disabled=this.exporting;
+		this.selected_export.onclick=()=>{void this.prepare_export(true,selection);};
+		close.type="button"; close.textContent="Close"; close.onclick=()=>this.close_tile();
+		this.tile_menu.replaceChildren(title,destination,help,this.selected_export,close); this.tile_menu.hidden=false;
+		this.tile_menu.style.left=`${Math.max(8,Math.min(x,window.innerWidth-this.tile_menu.offsetWidth-8))}px`;
+		this.tile_menu.style.top=`${Math.max(8,Math.min(y,window.innerHeight-this.tile_menu.offsetHeight-8))}px`;
+		this.selected_export.focus();
+	}
+
+	async prepare_export(tiles = false, selection?:TileExport): Promise<void> {
 		if (this.exporting || this.disposed) return;
-		this.exporting = true; this.export_button.disabled = this.tile_button.disabled = true;
+		this.exporting = true; this.export_button.disabled = this.tile_button.disabled = this.selected_export.disabled = true;
 		this.status.textContent = "Preparing terrain export…";
 		try {
 			await new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -78,7 +107,8 @@ export class TerrainControls {
 				if (!this.disposed) this.status.textContent = `Preparing terrain export: ${Math.round(fraction * 100)}%`;
 			};
 			let blob:Blob;
-			if(tiles && this.export_tiles)blob=await this.export_tiles(progress,()=>this.disposed);
+			if(selection)blob=await selection.export(progress,()=>this.disposed);
+			else if(tiles && this.export_tiles)blob=await this.export_tiles(progress,()=>this.disposed);
 			else {
 				const renderer=this.renderer();if(!renderer)throw new Error("3D terrain is unavailable. Check the page log.");
 				blob=await renderer.export_blob(this.theater,progress,()=>this.disposed);
@@ -86,13 +116,14 @@ export class TerrainControls {
 			if (this.disposed) return;
 			if (this.url) URL.revokeObjectURL(this.url);
 			this.url = URL.createObjectURL(blob); this.save.href = this.url;
-			this.save.download = `${this.theater.toLowerCase()}-${tiles?"tiles.zip":"terrain.gltf"}`; this.save.hidden = false;
-			this.save.textContent=tiles?"Save tile kit.zip":"Save .gltf";
-			this.status.textContent = `Ready (${(blob.size / 1048576).toFixed(1)} MB). ${tiles?"Save and extract the kit; each tile has a PNG reference and editable GLB.":"Click Save .gltf, then import it in Blender."}`;
+			this.save.download = `${this.theater.toLowerCase()}-${selection?selection.name.replace(/[^a-z0-9_.-]/gi,"-")+".zip":tiles?"tiles.zip":"terrain.gltf"}`; this.save.hidden = false;
+			this.save.textContent=selection?"Save selected tile.zip":tiles?"Save tile kit.zip":"Save .gltf";
+			this.status.textContent = selection?`Ready: ${selection.name}. Save and extract the ZIP. Place the edited GLB at ${selection.path}.`:`Ready (${(blob.size / 1048576).toFixed(1)} MB). ${tiles?"Save and extract the kit; each tile has a PNG reference and editable GLB.":"Click Save .gltf, then import it in Blender."}`;
+			if(selection) this.close_tile();
 		} catch (error) {
 			if (!this.disposed) this.status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
 		} finally {
-			this.exporting = false; this.export_button.disabled = this.tile_button.disabled = false;
+			this.exporting = false; this.export_button.disabled = this.tile_button.disabled = this.selected_export.disabled = false;
 		}
 	}
 

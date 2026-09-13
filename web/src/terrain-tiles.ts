@@ -6,7 +6,7 @@ import { tile_art, map_cliff_art, terrain_image, type TerrainImage } from "./ter
 import { TERRAIN_LEVEL, terrain_height, type TerrainCell, type TerrainMesh, type TerrainVertex } from "./terrain-mesh";
 
 export type TilePrimitive = { vertices: Float32Array; image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement };
-export type TileAsset = { primitives: TilePrimitive[] };
+export type TileAsset = { primitives: TilePrimitive[]; source?: ArrayBuffer };
 export type TileAssets = Map<string, TileAsset>;
 type Neighbor = { tile: IsoSubtile | null; height: number };
 type Neighbors = (Neighbor | undefined)[];
@@ -14,7 +14,14 @@ const CORNERS = [[0,0],[1,0],[1,1],[0,1]] as const;
 const OFFSETS = [[0,-1],[1,0],[0,1],[-1,0]] as const;
 
 export function tile_key(tiles: TheaterTiles, tile: number, subtile: number): string {
+	({tile,subtile}=tile_identity(tiles,tile,subtile));
 	return `${(tiles.names?.[tile] ?? `tile-${tile}`).toLowerCase()}/${subtile}`;
+}
+
+export function tile_identity(tiles: TheaterTiles, tile: number, subtile: number): {tile:number;subtile:number} {
+	if(tile<0 || tile===0xffff || tile>=tiles.sets.length) tile=0;
+	subtile=subtile%(tiles.sets[tile]?.length||1);
+	return {tile,subtile};
 }
 
 function triangle(out: number[], points: TerrainVertex[], image: TerrainImage | null): void {

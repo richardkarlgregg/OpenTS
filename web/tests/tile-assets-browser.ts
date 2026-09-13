@@ -67,3 +67,20 @@ const cliff=await import_tile_glb(await export_tile_glb(cliffTiles,0,0)), cliffE
 assert(cliffExpected.length===120,"Cliff starter should contain two ground and two wall triangles");
 for(let i=0;i<cliffExpected.length;i++) assert(Math.abs(cliffExpected[i]!-cliff.primitives[0]!.vertices[i]!)<1e-5,`Cliff GLB changed vertex ${i}`);
 log("PASS: four-corner indexed flat GLB and connected cliff wall geometry survive export/import; original PNG alpha is preserved.");
+
+const one=await export_tile_pack(tiles,'TEMPERATE',()=>{},()=>false,[{tile:65535,subtile:1}]);
+const oneFiles=unzipSync(new Uint8Array(await one.arrayBuffer()));
+assert(Object.keys(oneFiles).length===4&&oneFiles['tiles/temperate/clear01.tem/1.glb'],'Selected tile ZIP included other tiles or lost its canonical identity');
+const edited=await export_tile_pack(tiles,'TEMPERATE',()=>{},()=>false,[{tile:0,subtile:0}],new Map([['clear01.tem/0',parsed]]));
+const editedFiles=unzipSync(new Uint8Array(await edited.arrayBuffer()));
+assert(editedFiles['tiles/temperate/clear01.tem/0.glb']!.every((v,i)=>v===new Uint8Array(replacement)[i]),'Export discarded the installed replacement');
+const isolatedCells=[{x:8,y:9,height:4,tile:0,subtile:0},{x:9,y:9,height:0,tile:0,subtile:1}];
+const isolatedMesh=build_tile_map(isolatedCells,tiles);
+const selectedPack=await export_tile_pack(tiles,'TEMPERATE',()=>{},()=>false,[isolatedCells[0]!],new Map(),isolatedMesh);
+const selectedFiles=unzipSync(new Uint8Array(await selectedPack.arrayBuffer()));
+const selectedGLB=selectedFiles['tiles/temperate/clear01.tem/0.glb']!;
+const selectedAsset=await import_tile_glb(selectedGLB.slice().buffer as ArrayBuffer);
+assert(selectedAsset.primitives[0]!.vertices.length===120,'Selected cliff lost map boundary walls');
+const local=selectedAsset.primitives[0]!.vertices;
+for(let i=0;i<local.length;i+=10)assert(local[i]!>=0&&local[i]!<=1&&local[i+1]!>=0&&local[i+1]!<=1&&local[i+2]!>=-4&&local[i+2]!<=0,'Selected tile still has map translation/elevation');
+log('PASS: single-tile ZIP, clear-tile identity, preservation of edited GLB, and map cliff export in local coordinates.');

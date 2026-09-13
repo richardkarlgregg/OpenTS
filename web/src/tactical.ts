@@ -98,6 +98,8 @@ import {
 import { canvas_mouse, present, present_gpu, type CanvasLabel } from "./present";
 import { TerrainRenderer, terrain_defaults } from "./terrain-renderer";
 import { TerrainControls } from "./terrain-controls";
+import { pick_terrain_cell } from "./terrain-pick";
+import { tile_key } from "./terrain-tiles";
 import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
 import { blit_shape, blit_shape_shadow } from "./shp";
 import { Draw_Shroud, ShroudMap } from "./shroud";
@@ -1684,6 +1686,7 @@ export async function Show_Tactical(
 			resolve();
 		};
 		const on_move = (event: MouseEvent): void => {
+			if(terrain_controls.menu_open) { scroll.near_canvas=false; return; }
 			if (event.target instanceof Node && terrain_controls.element.contains(event.target)) {
 				scroll.near_canvas = false;
 				return;
@@ -1707,7 +1710,21 @@ export async function Show_Tactical(
 		};
 		const on_down = (event: MouseEvent): void => {
 			event.preventDefault();
+			const dismissing=terrain_controls.menu_open;
+			terrain_controls.close_tile();
 			on_move(event);
+			if(event.button===2 && terrain_enabled && terrain && over_tactical(mouse.Point.x,mouse.Point.y)) {
+				const origin=view_origin(camera), point=canvas_mouse(canvas,event);
+				const cell=pick_terrain_cell(terrain.mesh,point.x-TAC_X+origin.x,point.y-TAC_Y+origin.y,(x,y)=>!shroud||shroud.IsMapped(x,y));
+				if(cell) {
+					const key=tile_key(tiles,cell.tile,cell.subtile);
+					terrain_controls.show_tile(`${key} (cell ${cell.x}, ${cell.y})`,`public/remaster/tiles/${theater.toLowerCase()}/${key}.glb`,event.clientX,event.clientY,
+						(progress,cancelled)=>export_tile_pack(tiles,theater,progress,cancelled,[cell],tile_assets,terrain!.mesh));
+				}
+				scroll.mouse_down=false; scroll.near_canvas=false;
+				return;
+			}
+			if(dismissing) return;
 			if (artwork?.input_locked) {
 				return;
 			}
@@ -1937,6 +1954,7 @@ export async function Show_Tactical(
 				return;
 			}
 			if (event.key === "Escape") {
+				if(terrain_controls.menu_open) { terrain_controls.close_tile(); event.preventDefault(); return; }
 				if (artwork?.production.pending) {
 					artwork.production.pending = null;
 					event.preventDefault();

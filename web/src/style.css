@@ -68,3 +68,11 @@ pre {
 .terrain-debug-fields label { display: flex; align-items: center; gap: 0.4rem; }
 .terrain-debug-fields input[type="range"] { min-width: 60px; flex: 1; }
 .terrain-debug-fields output { min-width: 3rem; }
+.terrain-tile-menu {
+	position: fixed; z-index: 100; box-sizing: border-box;
+	width: min(360px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow: auto;
+	padding: 1rem; background: #172125; border: 1px solid #68828c;
+	box-shadow: 0 6px 24px #0009; color: #ecf5f5; cursor: auto;
+}
+.terrain-tile-menu p { overflow-wrap: anywhere; line-height: 1.5; }
+.terrain-tile-menu button { margin: 0.3rem 0.5rem 0 0; }

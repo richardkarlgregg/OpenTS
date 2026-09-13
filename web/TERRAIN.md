@@ -5,6 +5,35 @@ software renderer and the WebGL2 terrain renderer. Graphics controls remain
 available during scripted input locks. Gameplay, map formats, shroud and
 logical mouse coordinates are independent of this choice.
 
+## Right-click export
+
+Enable Remaster with **V**, then right-click a visible ground tile or cliff
+face. The tile panel shows its TMP filename, subtile, map cell and exact
+replacement path. Choose **Export this tile (PNG + GLB)**, then **Save selected
+tile.zip** above the canvas. The ZIP contains only that tile's GLB, original
+PNG, identity/path JSON and instructions.
+
+Generated tiles export the selected cell's actual mesh and cliff walls,
+including boundaries with other TMP files. Map position and elevation are
+removed so the GLB is ready for local tile editing in Blender. Existing
+replacements export their loaded GLB without losing your edits. The PNG is
+always the original artwork. Keep the origin and scale when editing.
+
+Save the edited GLB under `web/public/remaster/tiles/<theater>/<TMP filename>/<subtile>.glb`,
+using the exact path displayed in the panel. Reload the mission: every
+matching tile uses it in Remaster mode. Missing or invalid files keep the
+generated terrain. Default clear-tile map IDs share the actual clear tile's
+filename. A tile replacement applies to every occurrence, so model boundary
+walls to fit its intended neighbors; the selected cell's neighbors may vary
+on other maps.
+
+Escape, Close, or a click on the map dismisses the tile panel. In Remaster
+mode, right-clicking tactical terrain opens this panel even during scripted
+input locks; use Escape to cancel build/repair/sell modes. Sidebar and legacy
+right-click behavior are unchanged. The browser downloads the ZIP; place the
+edited GLB in the project folder yourself. The running mission does not
+hot-reload edited files.
+
 ## Export and replace individual tiles
 
 1. Open a mission in the theater you want to edit.

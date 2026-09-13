@@ -6,13 +6,17 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { zipSync, strToU8 } from "fflate";
 import { fetch_subtile, type TheaterTiles } from "./isotile";
-import { terrain_image, tile_art } from "./terrain-art";
-import { TERRAIN_LEVEL, type TerrainCell } from "./terrain-mesh";
-import { tile_key, tile_prototype, type TileAsset, type TileAssets } from "./terrain-tiles";
+import { terrain_image, tile_art, type TerrainImage } from "./terrain-art";
+import { TERRAIN_LEVEL, type TerrainCell, type TerrainMesh } from "./terrain-mesh";
+import { tile_key, tile_identity, tile_prototype, type TileAsset, type TileAssets } from "./terrain-tiles";
 import { unpack_hicolor } from "./surface";
 
 function original_image(tiles: TheaterTiles, tile: number, subtile: number, mesh_texture=false): HTMLCanvasElement {
 	const source = mesh_texture ? tile_art(tiles,tile,subtile)! : terrain_image(fetch_subtile(tiles,tile,subtile)!);
+	return palette_image(tiles,source);
+}
+
+function palette_image(tiles:TheaterTiles,source:TerrainImage):HTMLCanvasElement {
 	const canvas=document.createElement("canvas"); canvas.width=source.width; canvas.height=source.height;
 	const ctx=canvas.getContext("2d")!, pixels=ctx.createImageData(source.width,source.height);
 	for(let i=0;i<source.indices.length;i++) { const index=source.indices[i]!; pixels.data.set([...unpack_hicolor(tiles.palette[index]!),index?255:0],i*4); }
@@ -22,8 +26,8 @@ const png = (canvas:HTMLCanvasElement):Promise<Uint8Array> => new Promise((resol
 	if (!blob) reject(new Error("PNG encoding failed")); else blob.arrayBuffer().then(b=>resolve(new Uint8Array(b)),reject);
 },"image/png"));
 
-export async function export_tile_glb(tiles:TheaterTiles,tile:number,subtile:number):Promise<ArrayBuffer> {
-	const data=tile_prototype(tiles,tile,subtile), positions:number[]=[],normals:number[]=[],uv:number[]=[];
+export async function export_tile_glb(tiles:TheaterTiles,tile:number,subtile:number, selected?:{vertices:Float32Array;image:HTMLCanvasElement}):Promise<ArrayBuffer> {
+	const data=selected?.vertices??tile_prototype(tiles,tile,subtile), positions:number[]=[],normals:number[]=[],uv:number[]=[];
 	const indices:number[]=[], shared=new Map<string,number>();
 	for(let i=0;i<data.length;i+=10) {
 		const key=[...data.slice(i,i+5),...data.slice(i+7,i+10)].join(",");
@@ -36,29 +40,43 @@ export async function export_tile_glb(tiles:TheaterTiles,tile:number,subtile:num
 	}
 	const geometry=new BufferGeometry(); geometry.setAttribute("position",new Float32BufferAttribute(positions,3)); geometry.setAttribute("normal",new Float32BufferAttribute(normals,3)); geometry.setAttribute("uv",new Float32BufferAttribute(uv,2));
 	geometry.setIndex(indices);
-	const map=new CanvasTexture(original_image(tiles,tile,subtile,true)); map.flipY=false; map.colorSpace=SRGBColorSpace;
+	const map=new CanvasTexture(selected?.image??original_image(tiles,tile,subtile,true)); map.flipY=false; map.colorSpace=SRGBColorSpace;
 	const material=new MeshStandardMaterial({map,side:DoubleSide,alphaTest:0.5,roughness:1,metalness:0});
 	const mesh=new Mesh(geometry,material); mesh.name=tile_key(tiles,tile,subtile); mesh.userData={opentsTile:mesh.name,origin:"cell corner",heightLevel:TERRAIN_LEVEL};
 	try { return await new GLTFExporter().parseAsync(mesh,{binary:true}) as ArrayBuffer; }
 	finally {geometry.dispose();material.dispose();map.dispose();}
 }
 
-export async function export_tile_pack(tiles:TheaterTiles,theater:string,progress:(value:number)=>void,cancelled:()=>boolean):Promise<Blob> {
-	const entries:Record<string,Uint8Array>={}, list:{tile:number;subtile:number}[]=[];
-	for(let tile=0;tile<tiles.sets.length;tile++) for(let subtile=0;subtile<tiles.sets[tile]!.length;subtile++) list.push({tile,subtile});
+export async function export_tile_pack(tiles:TheaterTiles,theater:string,progress:(value:number)=>void,cancelled:()=>boolean,
+	selection?: {tile:number;subtile:number;x?:number;y?:number;height?:number}[], assets?: TileAssets, context?:TerrainMesh):Promise<Blob> {
+	const entries:Record<string,Uint8Array>={}, list:{tile:number;subtile:number;x?:number;y?:number;height?:number}[]=[];
+	if(selection) list.push(...selection.map(item=>({...item,...tile_identity(tiles,item.tile,item.subtile)})));
+	else for(let tile=0;tile<tiles.sets.length;tile++) for(let subtile=0;subtile<tiles.sets[tile]!.length;subtile++) list.push({tile,subtile});
 	for(const [i,item] of list.entries()) {
 		if(cancelled())throw new Error("Tile export cancelled");
 		const key=tile_key(tiles,item.tile,item.subtile), base=`tiles/${theater.toLowerCase()}/${key}`;
+		const asset=assets?.get(key);
+		const parts=!asset?.source&&context?context.parts.filter(p=>p.cell.x===item.x&&p.cell.y===item.y):[];
+		let selected:{vertices:Float32Array;image:HTMLCanvasElement}|undefined;
+		const source=parts.length?context!.materials[parts[0]!.material]!.source:undefined;
+		if(parts.length&&source&&item.height!==undefined) {
+			const vertices=new Float32Array(parts.reduce((sum,p)=>sum+p.vertices.length,0)); let offset=0;
+			for(const part of parts) { vertices.set(part.vertices,offset); offset+=part.vertices.length; }
+			for(let j=0;j<vertices.length;j+=10) {vertices[j]=vertices[j]!-item.x!;vertices[j+1]=vertices[j+1]!-item.y!;vertices[j+2]=vertices[j+2]!-item.height;vertices[j+5]=vertices[j+6]=0;}
+			selected={vertices,image:palette_image(tiles,source)};
+		}
+		if(!fetch_subtile(tiles,item.tile,item.subtile)) throw new Error("Original tile artwork is unavailable");
 		entries[`${base}.png`]=await png(original_image(tiles,item.tile,item.subtile));
-		entries[`${base}.glb`]=new Uint8Array(await export_tile_glb(tiles,item.tile,item.subtile));
+		entries[`${base}.glb`]=new Uint8Array(asset?.source??await export_tile_glb(tiles,item.tile,item.subtile,selected));
 		const tile=fetch_subtile(tiles,item.tile,item.subtile)!;
-		const texture=tile_art(tiles,item.tile,item.subtile)!;
-		entries[`${base}.json`]=strToU8(JSON.stringify({version:2,theater,key,ramp:tile.ramp,recordHeight:tile.record_height??0,location:tile.location,
-			image:{left:terrain_image(tile).left,top:terrain_image(tile).top},meshTexture:{left:texture.left,top:texture.top,width:texture.width,height:texture.height},
-			wallOwnership:"higher cell; TMP internal neighbors",triangles:tile_prototype(tiles,item.tile,item.subtile).length/30},null,2));
+		const texture=source??tile_art(tiles,item.tile,item.subtile)!;
+		entries[`${base}.json`]=strToU8(JSON.stringify({version:2,theater,key,replacementPath:`public/remaster/${base}.glb`,geometrySource:asset?.source?"replacement":selected?"selected map tile":"generated",ramp:tile.ramp,recordHeight:tile.record_height??0,location:tile.location,
+			image:{left:terrain_image(tile).left,top:terrain_image(tile).top},meshTexture:asset?.source?undefined:{left:texture.left,top:texture.top,width:texture.width,height:texture.height},
+			wallOwnership:asset?.source?"replacement geometry":selected?"higher cell; selected map neighbors":"higher cell; TMP internal neighbors",
+			triangles:asset?.source?asset.primitives.reduce((sum,p)=>sum+p.vertices.length/30,0):(selected?.vertices??tile_prototype(tiles,item.tile,item.subtile)).length/30},null,2));
 		progress((i+1)/list.length); if(i%8===0)await new Promise(resolve=>setTimeout(resolve,0));
 	}
-	entries["README.txt"]=strToU8("Import a tile GLB into Blender. Keep its origin, scale and placement; one cell side is one unit. glTF Y is up; Blender converts to Z-up. Edit the mesh, UVs, Base Color and Normal Map. Export selected tile objects as glTF Binary (.glb), with materials and images embedded, no compression or animations. Save at the same tiles/<theater>/<TMP filename>/<subtile>.glb path inside web/public/remaster/. Mission loading discovers files automatically. PNG files are the original indexed artwork expanded to RGBA. JSON files record tile identity and artwork offsets. Do not add the map's elevation to the asset: mission placement supplies it. Ground uses two triangles. Cliff walls belong to the higher cell and join known neighbors inside the TMP stamp; model unknown external boundaries as needed. GLB textures combine neighboring TMP records and extend color into unpainted regions; the separate PNG preserves the original image. Re-export kits to obtain updated starter geometry.\n");
+	entries["README.txt"]=strToU8("Import a tile GLB into Blender. Keep its origin, scale and placement; one cell side is one unit. glTF Y is up; Blender converts to Z-up. Edit the mesh, UVs, Base Color and Normal Map. Export selected tile objects as glTF Binary (.glb), with materials and images embedded, no compression or animations. Save at the same tiles/<theater>/<TMP filename>/<subtile>.glb path inside web/public/remaster/. Mission loading discovers files automatically. PNG files are the original indexed artwork expanded to RGBA. JSON files record tile identity and artwork offsets. Do not add the map's elevation to the asset: mission placement supplies it. Generated ground uses two triangles. Theater-kit walls use neighbors in the TMP stamp; right-click exports use the selected map cell's neighbors. Edited replacements are exported as loaded. A replacement applies to every matching tile; check boundary compatibility on other maps. GLB textures combine neighboring TMP records and extend color into unpainted regions; the separate PNG preserves the original image. Re-export kits to obtain updated starter geometry.\n");
 	if(cancelled())throw new Error("Tile export cancelled");
 	return new Blob([zipSync(entries,{level:0}) as Uint8Array<ArrayBuffer>],{type:"application/zip"});
 }
@@ -88,7 +106,7 @@ export async function import_tile_glb(bytes:ArrayBuffer):Promise<TileAsset> {
 	if((json.buffers??[]).some((b:{uri?:string})=>b.uri)|| (json.images??[]).some((i:{uri?:string})=>i.uri))throw new Error("Embed buffers and images in the GLB");
 	if(json.animations?.length||json.skins?.length||json.extensionsRequired?.length)throw new Error("Export static tiles without compression or required extensions");
 	const gltf=await new GLTFLoader().parseAsync(bytes,""); gltf.scene.updateMatrixWorld(true);
-	const result:TileAsset={primitives:[]}; let vertices=0;
+	const result:TileAsset={primitives:[],source:bytes}; let vertices=0;
 	const geometries=new Set<BufferGeometry>(), materials=new Set<MeshStandardMaterial>(), textures=new Set<Texture>();
 	try {
 		gltf.scene.traverse(object=>{
