@@ -1,14 +1,14 @@
 /*******************************************************************************
- *                                O P E N T S
- *******************************************************************************
- * SPDX-License-Identifier: GPL-3.0-or-later
- * Copyright 2025 Electronic Arts Inc.
- * Copyright 2026 OpenTS contributors
- *
- * Contains material derived from Electronic Arts source code.
- * Modified by OpenTS contributors, 2026.
- * EA's GPLv3 Section 7 additional terms and warranty disclaimers apply; see LICENSE.md.
- ******************************************************************************/
+	*                                O P E N T S
+	*******************************************************************************
+	* SPDX-License-Identifier: GPL-3.0-or-later
+	* Copyright 2025 Electronic Arts Inc.
+	* Copyright 2026 OpenTS contributors
+	*
+	* Contains material derived from Electronic Arts source code.
+	* Modified by OpenTS contributors, 2026.
+	* EA's GPLv3 Section 7 additional terms and warranty disclaimers apply; see LICENSE.md.
+	******************************************************************************/
 
 import type { GameDirectory } from "./files";
 import type { Point2D, Rect } from "./ini";
@@ -99,7 +99,7 @@ import { canvas_mouse, present, present_gpu, type CanvasLabel } from "./present"
 import { TerrainRenderer, terrain_defaults } from "./terrain-renderer";
 import { TerrainControls } from "./terrain-controls";
 import { pick_terrain_cell } from "./terrain-pick";
-import { tile_key } from "./terrain-tiles";
+import { tile_set_key, tile_records } from "./terrain-tiles";
 import { Compute_Radar_Image, over_radar, Radar_Pixel_To_Cell, Render_Radar, type RadarMap } from "./radar";
 import { blit_shape, blit_shape_shadow } from "./shp";
 import { Draw_Shroud, ShroudMap } from "./shroud";
@@ -1468,17 +1468,21 @@ export async function Show_Tactical(
 		Bind_Path_Graph(artwork, cell_keys);
 	}
 	const bridges = artwork ? bridge_cells(artwork) : new Set<string>();
-	const { load_tile_assets, export_tile_pack } = await import("./terrain-assets");
+	const { load_tile_assets, export_stamp_pack } = await import("./terrain-assets");
 	const tile_assets = await load_tile_assets(theater, draw_list, tiles, log);
 	let terrain: TerrainRenderer | null = null;
 	let terrain_enabled = false;
 	const terrain_settings = terrain_defaults();
+	let replacement_mode=terrain_settings.replacements;
 	const prepare_terrain = (): void => {
-		if (terrain) return;
+		if (terrain && replacement_mode===terrain_settings.replacements) return;
 		try {
+			const previous=terrain;
 			terrain = new TerrainRenderer(draw_list, tiles, cell_lights, artwork?.theater_palette ?? tiles.palette, terrain_settings, tile_assets);
+			previous?.dispose(); replacement_mode=terrain_settings.replacements;
 			log(`3D terrain ready: ${terrain.mesh.triangles.toLocaleString()} triangles from ${draw_list.length.toLocaleString()} cells.`);
 		} catch (error) {
+			terrain_settings.replacements=replacement_mode;
 			log(`3D terrain unavailable: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
@@ -1489,7 +1493,7 @@ export async function Show_Tactical(
 		terrain_controls.set_mode(terrain_enabled);
 	};
 	const terrain_controls = new TerrainControls(canvas, terrain_settings, theater, () => { prepare_terrain(); return terrain; }, toggle_terrain,
-		(progress, cancelled) => export_tile_pack(tiles, theater, progress, cancelled));
+		(progress, cancelled) => export_stamp_pack(tiles, theater, progress, cancelled,undefined,tile_assets),prepare_terrain);
 	let shift_down = false;
 	const exits: FactoryObject[] = [];
 	let exiting = false;
@@ -1547,7 +1551,7 @@ export async function Show_Tactical(
 				const rect = canvas.getBoundingClientRect();
 				const scale = Math.min(3840 / SCREEN_W, 2160 / SCREEN_H, Math.max(1, rect.width * window.devicePixelRatio / SCREEN_W));
 				const image = terrain.render(view_origin(camera), SCREEN_W * scale, SCREEN_H * scale, black.frame, white.frame,
-					(x, y) => !shroud || shroud.IsMapped(x, y));
+					(x, y) => !shroud || shroud.IsMapped(x, y), scroll.near_canvas?mouse.Point:undefined);
 				present_gpu(canvas, image, black.frame, black.labels);
 				return;
 			} catch (error) {
@@ -1717,9 +1721,9 @@ export async function Show_Tactical(
 				const origin=view_origin(camera), point=canvas_mouse(canvas,event);
 				const cell=pick_terrain_cell(terrain.mesh,point.x-TAC_X+origin.x,point.y-TAC_Y+origin.y,(x,y)=>!shroud||shroud.IsMapped(x,y));
 				if(cell) {
-					const key=tile_key(tiles,cell.tile,cell.subtile);
-					terrain_controls.show_tile(`${key} (cell ${cell.x}, ${cell.y})`,`public/remaster/tiles/${theater.toLowerCase()}/${key}.glb`,event.clientX,event.clientY,
-						(progress,cancelled)=>export_tile_pack(tiles,theater,progress,cancelled,[cell],tile_assets,terrain!.mesh));
+					const name=tile_set_key(tiles,cell.tile),count=tile_records(tiles,cell.tile).length;
+					terrain_controls.show_tile(`${name} — complete piece (${count} cells)`,`public/remaster/tiles/${theater.toLowerCase()}/${name}/tile.glb`,event.clientX,event.clientY,
+						(progress,cancelled)=>export_stamp_pack(tiles,theater,progress,cancelled,[cell.tile],tile_assets));
 				}
 				scroll.mouse_down=false; scroll.near_canvas=false;
 				return;

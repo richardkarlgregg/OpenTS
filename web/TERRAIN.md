@@ -5,96 +5,135 @@ software renderer and the WebGL2 terrain renderer. Graphics controls remain
 available during scripted input locks. Gameplay, map formats, shroud and
 logical mouse coordinates are independent of this choice.
 
-## Right-click export
+## Export complete TMP pieces
 
-Enable Remaster with **V**, then right-click a visible ground tile or cliff
-face. The tile panel shows its TMP filename, subtile, map cell and exact
-replacement path. Choose **Export this tile (PNG + GLB)**, then **Save selected
-tile.zip** above the canvas. The ZIP contains only that tile's GLB, original
-PNG, identity/path JSON and instructions.
+Enable Remaster with **V**, then right-click any visible cell of the piece.
+Choose **Export complete tile (PNG + GLB)**, then **Save selected tile.zip**.
+The panel shows the TMP filename, occupied cell count and exact replacement
+path. **Export tile kit (PNG + GLB)** exports every loaded TMP piece once.
 
-Generated tiles export the selected cell's actual mesh and cliff walls,
-including boundaries with other TMP files. Map position and elevation are
-removed so the GLB is ready for local tile editing in Blender. Existing
-replacements export their loaded GLB without losing your edits. The PNG is
-always the original artwork. Keep the origin and scale when editing.
+Each `tiles/<theater>/<TMP filename>/tile` entry contains:
 
-Save the edited GLB under `web/public/remaster/tiles/<theater>/<TMP filename>/<subtile>.glb`,
-using the exact path displayed in the panel. Reload the mission: every
-matching tile uses it in Remaster mode. Missing or invalid files keep the
-generated terrain. Default clear-tile map IDs share the actual clear tile's
-filename. A tile replacement applies to every occurrence, so model boundary
-walls to fit its intended neighbors; the selected cell's neighbors may vary
-on other maps.
+- `tile.glb`: all occupied subtiles assembled at their native grid positions
+  and record heights, plus an orthographic reference camera.
+- `tile.png`: the assembled original artwork, with transparency.
+- `tile.json`: footprint, coordinate convention and replacement path.
+
+For example, `cliff17.tem` is a 2×2 stamp with heights `[4, 0, 4, 0]` in
+row-major order: two upper ground cells, two lower cells and two cliff quads.
+Its starter has 12 triangles. The GLB contains the complete piece, regardless
+of which of its four cells was clicked. It has no walls inferred from unrelated
+neighboring map tiles. An existing complete-piece replacement exports its
+loaded GLB unchanged; the PNG remains the original artwork.
+
+Import the GLB into Blender. Its children are named `subtile_N` beneath one
+TMP parent. Keep their relative transforms, origin and scale; do not center
+each object separately. You may join the meshes. The included **Tiberian Sun
+isometric reference** camera uses the game's 2:1 projection. Use Blender's
+camera view to compare orientation against `tile.png`. Export all mesh objects
+of the piece as **glTF Binary (.glb)** with embedded materials/images, without
+animation or compression. The camera is optional when exporting back.
+
+For this example, save the edited file at:
+`web/public/remaster/tiles/temperate/cliff17.tem/tile.glb`.
+Reload the mission to load it in Remaster mode. The browser downloads the ZIP;
+place the edited GLB in the project folder yourself. There is no live reload
+inside a running mission.
+
+The loader matches theater, TMP filename, each occupied slot's map position,
+and its relative height. A complete matching footprint is replaced **once**.
+Partially overwritten stamps, missing cells or altered relative heights keep
+their generated terrain or older subtile replacements. Default clear-tile map
+IDs resolve to the actual clear filename. Filename matching is case-insensitive;
+avoid paths differing only in case. No handwritten manifest is needed.
+
+Older `<subtile>.glb` files still load as per-cell fallbacks with their original
+coordinate convention. A matching `tile.glb` takes precedence over them.
+Re-export complete pieces to migrate; renaming an old `2.glb` to `tile.glb`
+does not turn it into a complete assembly. Existing user assets are not modified.
+Extracting a whole kit into `public/remaster/` installs all its starter models.
 
 Escape, Close, or a click on the map dismisses the tile panel. In Remaster
-mode, right-clicking tactical terrain opens this panel even during scripted
-input locks; use Escape to cancel build/repair/sell modes. Sidebar and legacy
-right-click behavior are unchanged. The browser downloads the ZIP; place the
-edited GLB in the project folder yourself. The running mission does not
-hot-reload edited files.
+mode this panel remains available during scripted input locks; use Escape to
+cancel build/repair/sell modes. Sidebar and legacy right-click behavior remain
+unchanged. The page log reports loaded assets and matched complete footprints.
+Restart Vite after updating its manifest plugin if it has not restarted itself.
 
-## Export and replace individual tiles
-
-1. Open a mission in the theater you want to edit.
-2. Click **Export tile kit (PNG + GLB)**. When preparation finishes, click
-   **Save tile kit.zip** and extract it into a working folder.
-3. The ZIP contains every loaded subtile in that theater, once each. Each
-   `tiles/<theater>/<TMP filename>/<subtile>` entry has an original `.png`,
-   a low-poly `.glb` starting mesh and `.json` identity metadata.
-4. Import a GLB into Blender. Remodel the tile and edit its UVs and material.
-   Keep the imported origin, scale and placement. Other imported tiles can
-   be used as references; export only the objects belonging to this tile.
-5. Export **glTF Binary (.glb)** with selected objects, materials and embedded
-   images, without animation or compression. Save to the same relative path
-   under **web/public/remaster/**. For example:
-   `web/public/remaster/tiles/temperate/clear01.tem/0.glb`.
-6. Open the mission again. The dev server discovers GLBs automatically;
-   no hand-written manifest is required. The page log reports how many unique
-   replacements loaded and identifies rejected files. Missing or unsupported
-   replacements use generated tiles. Restart Vite once after updating the
-   project configuration to enable discovery.
-
-Matching uses theater, TMP filename and subtile number, not a map-specific
-tile number or cell coordinate. Every occurrence of the matching tile uses
-its replacement. Filename matching is case-insensitive; do not create two
-paths differing only in case. PNG and JSON files are reference material;
-runtime loading only needs the GLB. Extracting an entire kit directly into
-`public/remaster/` installs every starter mesh in that kit as a replacement.
-
-Production builds generate `remaster/manifest.json` and copy the assets into
-`dist/remaster/`. Run `npm run build` after changing those assets, and deploy
-the build together. The generated manifest records file size and modification
-time. Mission loading refreshes it and requests current asset revisions.
+Production builds generate `remaster/manifest.json` and copy assets into
+`dist/remaster/`. Rebuild after changing those assets and deploy the build
+together. Mission loading refreshes the manifest and requests current revisions.
 
 ## Coordinates and material settings
 
-One horizontal cell side is one unit. The origin is the cell corner, and the
-opposite corner is `(1, 1)` in the two map axes. Cell elevation is supplied by
-the map; do not bake a mission's elevation into a replacement.
-Generated ground vertices stay within the cell boundary. Cliff walls descend
-from that boundary. Keep the cell origin; do not rescale each model to fit
-its bounding box.
+One horizontal cell side is one unit. The assembly origin is the TMP grid's
+`(0, 0)` corner at base height zero. Record heights are included in the model;
+the mission supplies only the placement's base elevation. In Blender, the
+new complete-piece convention is X = map X, Y = **negative map Y**, Z = height.
+In glTF it is X = map X, Y = height, Z = map Y. This reflection, with reversed
+triangle winding, preserves the original game's screen orientation. One
+height level is `sqrt(1/6)` units. Blender converts glTF Y-up to Z-up and back.
 
-In GLB coordinates, X follows the first cell axis, Y is up and negative Z
-follows the second cell axis. One height level is `sqrt(1/6)` units. Blender's
-importer converts glTF Y-up to Blender Z-up automatically. Exporting through
-Blender converts back. Parent/node transforms are applied by the importer;
-keeping the original tile origin is still essential for placement.
+Older numbered-subtile GLBs used glTF Z = negative map Y; the loader retains
+that convention only for those filenames. Complete pieces use `tile.glb` and
+the new convention. Parent/node transforms are applied by the importer. Keep
+the assembly origin and scale even when reshaping or joining mesh objects.
 
-Use a nonmetallic **Principled BSDF** with Base Color and an optional
-**Normal Map** at strength 1. Images are embedded and can be up to 4096×4096.
-UV0 must be in the 0–1 range. Bake procedural shaders and texture transforms
-into images/UVs. Opaque and alpha-clipped materials are supported. Multiple
-static mesh objects and materials within one tile are supported.
+Use **Principled BSDF** and baked image textures, embedded in a GLB:
 
-The runtime does not implement metallic/roughness textures, AO textures,
-emission, transparent blending, animated/skinned meshes, morph targets or
-compressed/extension-dependent GLBs. Rejected assets produce an explanation
-and fall back without preventing the mission from opening. GLBs must embed
-all buffers and images. A tile is limited to 250,000 triangles and 100 MB;
-these are validation limits, not recommended modelling budgets. Keep meshes
-small because many cells can repeat one tile.
+| Bake / map | Blender connection | Color space |
+| --- | --- | --- |
+| Base color / diffuse (color only) | Base Color | sRGB |
+| Tangent-space normal (+Y / OpenGL) | Image → Normal Map → Normal | Non-Color |
+| Roughness | Roughness | Non-Color |
+| Metallic (normally 0 for rock/soil) | Metallic | Non-Color |
+| Ambient occlusion | glTF Material Output group, Occlusion input | Non-Color |
+| Emissive color | Emission Color | sRGB |
+
+For sculpted terrain, bake high-poly detail onto the low-poly mesh's UV0.
+Use a tangent normal bake and bake base color without direct/indirect lighting.
+Bake AO separately so it affects ambient lighting rather than permanently
+painting shadows into the diffuse texture. Preserve the low-poly silhouette
+and tile boundaries. Height/displacement textures do not displace geometry;
+put silhouette changes in the mesh and bake fine detail into normals.
+
+Separate roughness/metallic images are supported when the Blender exporter
+packs them. A packed ORM image uses R = AO, G = roughness, B = metallic.
+Connect G and B through Separate Color to their Principled inputs. AO needs
+the exporter-recognized glTF Material Output group. See the
+[official Blender glTF material guide](https://github.com/KhronosGroup/glTF-Blender-IO/blob/main/docs/blender_docs/scene_gltf2.rst).
+Normal strength, roughness/metallic factors, AO strength and emissive color/
+strength are read from the exported material. Diffuse/emission use sRGB;
+normal and ORM data stay linear. Material channels also survive whole-map
+export; individual replacement exports preserve the installed GLB bytes.
+
+Images can be up to 4096×4096. Use UV0 in the 0–1 range and bake texture
+transforms/procedural nodes into images. Opaque and alpha-clipped materials
+are supported, including multiple mesh objects/materials in one piece.
+The renderer uses direct sun/cursor specular lighting, with ambient diffuse;
+it has no environment reflections. Transparent blending, animated/skinned
+meshes, morph targets, vertex colors, compressed assets and required material
+extensions other than emissive strength are unsupported. Rejected assets log
+an explanation and fall back without preventing the mission from opening.
+GLBs must embed their buffers/images and stay below 250,000 triangles / 100 MB.
+
+## Material and replacement debugging
+
+Open **Terrain debug** while Remaster is enabled:
+
+- **Replacement tiles / assets** switches between loaded replacement GLBs and
+  generated terrain immediately, retaining mission state and camera position.
+  This covers both complete TMP pieces and numbered subtile assets. It does
+  not change sprites or files on disk; new/edited GLBs still need a mission reload.
+- **Base color / diffuse**, **Normal maps**, **Roughness**, **Metallic**,
+  **Ambient occlusion** and **Emission** can be inspected independently.
+  **Normal strength** multiplies the strength saved in the material.
+- **Light follows cursor** places a point light along the camera ray above the
+  visible surface under the pointer. Height, range and intensity are adjustable.
+  It works with directional lighting off, stays inactive over the sidebar or
+  hidden terrain, and follows cliffs and edited meshes. It does not cast shadows;
+  the sun's existing terrain shadows remain available.
+- **Surface normals**, **Wireframe**, sun controls and **Reset lighting and
+  debug** remain available. Reset restores replacement assets and material maps.
 
 ## Generated meshes and density
 
@@ -118,12 +157,10 @@ remain open; no arbitrary skirt extends below the map.
 `code/isotype.h` defines the TMP slot order as `x + MapWidth*y`.
 `IsometricTileClass::Mark` in `code/isotile.cpp` stamps each record's height
 and ramp into its cell. The browser retains those record locations and
-heights. Tile-kit GLBs include walls against known neighbors within that TMP
-stamp. Unknown neighbors outside the stamp have no invented height. A
-replacement owns its complete tile geometry, including cliff walls; mission
-loading does not add generated walls to that replacement. Match the adjoining
-terrain when modelling replacement boundaries. Existing GLBs keep their old
-geometry; export a new kit to obtain these revised starter meshes.
+heights. Complete-piece GLBs include all occupied records with walls against
+known neighbors inside that TMP. Unknown external neighbors have no invented
+height. Runtime generated terrain still joins actual map neighbors. A complete
+replacement owns its assembly geometry, including its cliff faces.
 
 TMP extra imagery contributes color, not extra geometry. `Draw_Tile` in
 `code/isotype.cpp` uses Z data for painter/depth ordering; it is not a ground
@@ -131,8 +168,8 @@ height field. The starter GLB texture combines the TMP's records in their
 original projected positions. Runtime cliff textures also include nearby map
 artwork where a corner spans several TMP files. This is fixed-camera color
 projection onto the connected walls. Empty texels are color-extended to keep
-generated terrain solid. The separate original PNG keeps its transparency.
-JSON version 2 records both original-image and mesh-texture offsets.
+generated terrain solid. The assembled original PNG keeps its transparency.
+JSON version 3 records the complete footprint and GLB/Blender axis convention.
 
 These meshes provide the game's logical ground and grid-aligned cliffs.
 Rock protrusions, hidden backs, tunnel interiors and bridge undersides need

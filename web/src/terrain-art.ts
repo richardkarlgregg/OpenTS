@@ -10,6 +10,25 @@ const images = new WeakMap<IsoSubtile, TerrainImage>();
 
 const tile_images = new WeakMap<IsoSubtile, TerrainImage>();
 
+/** Unmodified, transparent artwork for the entire TMP footprint, in stamp coordinates. */
+export function stamp_image(tiles: TheaterTiles, index: number): TerrainImage {
+	const records=(tiles.sets[index]??[]).map((tile,subtile)=>({tile,subtile})).filter(r=>!r.tile.absent).map(({tile,subtile})=> {
+		const location=tile.location??{x:subtile,y:0};
+		return {image:terrain_image(tile),x:24*(location.x-location.y),y:12*(location.x+location.y-(tile.record_height??0)),order:location.x+location.y,tie:location.x};
+	}).sort((a,b)=>a.order-b.order||a.tie-b.tie);
+	if(!records.length) throw new Error("TMP has no occupied cells");
+	const left=Math.min(...records.map(r=>r.x+r.image.left)),top=Math.min(...records.map(r=>r.y+r.image.top));
+	const width=Math.max(...records.map(r=>r.x+r.image.left+r.image.width))-left;
+	const height=Math.max(...records.map(r=>r.y+r.image.top+r.image.height))-top;
+	if(width>4096||height>4096) throw new Error("TMP reference image exceeds 4096 pixels");
+	const indices=new Uint8Array(width*height);
+	for(const r of records)for(let y=0;y<r.image.height;y++)for(let x=0;x<r.image.width;x++) {
+		const color=r.image.indices[y*r.image.width+x]!;
+		if(color)indices[(r.y+r.image.top+y-top)*width+r.x+r.image.left+x-left]=color;
+	}
+	return {left,top,width,height,indices,depth:new Int16Array(indices.length).fill(-1)};
+}
+
 /** Project a complete TMP stamp, including artwork belonging to adjacent records. */
 export function tile_art(tiles: TheaterTiles, index: number, subtile: number): TerrainImage | null {
 	const tile = fetch_subtile(tiles,index,subtile);

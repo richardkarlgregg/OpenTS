@@ -5,7 +5,7 @@ import { fetch_subtile, type IsoSubtile, type TheaterTiles } from "./isotile";
 import { tile_art, map_cliff_art, terrain_image, type TerrainImage } from "./terrain-art";
 import { TERRAIN_LEVEL, terrain_height, type TerrainCell, type TerrainMesh, type TerrainVertex } from "./terrain-mesh";
 
-export type TilePrimitive = { vertices: Float32Array; image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement };
+export type TilePrimitive = import("./terrain-mesh").TerrainSurface & { vertices: Float32Array };
 export type TileAsset = { primitives: TilePrimitive[]; source?: ArrayBuffer };
 export type TileAssets = Map<string, TileAsset>;
 type Neighbor = { tile: IsoSubtile | null; height: number };
@@ -22,6 +22,63 @@ export function tile_identity(tiles: TheaterTiles, tile: number, subtile: number
 	if(tile<0 || tile===0xffff || tile>=tiles.sets.length) tile=0;
 	subtile=subtile%(tiles.sets[tile]?.length||1);
 	return {tile,subtile};
+}
+
+export function tile_set_key(tiles:TheaterTiles,tile:number):string {
+	return tile_key(tiles,tile,0).split("/")[0]!;
+}
+
+export function tile_records(tiles:TheaterTiles,tile:number):TerrainCell[] {
+	tile=tile_identity(tiles,tile,0).tile;
+	return (tiles.sets[tile]??[]).flatMap((record,subtile)=>record.absent?[]:[{
+		x:record.location?.x??subtile,y:record.location?.y??0,height:record.record_height??0,tile,subtile,
+	}]);
+}
+
+export type TileInstance = { key:string; origin:{x:number;y:number;height:number}; members:TerrainCell[]; asset:TileAsset };
+
+/** A complete TMP replacement is placed once, only when its full footprint matches the map. */
+export function tile_instances(cells:TerrainCell[],tiles:TheaterTiles,assets:TileAssets):TileInstance[] {
+	const lookup=new Map(cells.map(c=>[`${c.x},${c.y}`,c])), seen=new Set<string>(), result:TileInstance[]=[];
+	const records=new Map<number,TerrainCell[]>();
+	for(const cell of cells) {
+		const id=tile_identity(tiles,cell.tile,cell.subtile),key=`${tile_set_key(tiles,id.tile)}/tile`,asset=assets.get(key);
+		if(!asset)continue;
+		let stamp=records.get(id.tile);
+		if(!stamp){stamp=tile_records(tiles,id.tile);records.set(id.tile,stamp);}
+		const record=stamp.find(r=>r.subtile===id.subtile); if(!record)continue;
+		const origin={x:cell.x-record.x,y:cell.y-record.y,height:cell.height-record.height};
+		const placement=`${key}@${origin.x},${origin.y},${origin.height}`;
+		if(seen.has(placement))continue; seen.add(placement);
+		const members:TerrainCell[]=[];
+		for(const r of stamp) {
+			const member=lookup.get(`${origin.x+r.x},${origin.y+r.y}`);
+			if(!member)break;
+			const identity=tile_identity(tiles,member.tile,member.subtile);
+			if(identity.tile!==id.tile||identity.subtile!==r.subtile||member.height!==origin.height+r.height)break;
+			members.push(member);
+		}
+		if(members.length===stamp.length)result.push({key,origin,members,asset});
+	}
+	return result;
+}
+
+function append_instance(mesh:TerrainMesh,instance:TileInstance,materials:number[]):void {
+	const {origin,members,asset}=instance;
+	for(const [material,primitive] of asset.primitives.entries()) {
+		const groups=new Map<TerrainCell,number[]>(),v=primitive.vertices;
+		for(let i=0;i<v.length;i+=30) {
+			const x=origin.x+(v[i]!+v[i+10]!+v[i+20]!)/3,y=origin.y+(v[i+1]!+v[i+11]!+v[i+21]!)/3;
+			let owner=members[0]!,distance=Infinity;
+			for(const cell of members) {
+				const d=Math.max(cell.x-x,0,x-cell.x-1)**2+Math.max(cell.y-y,0,y-cell.y-1)**2;
+				if(d<distance-1e-8||(Math.abs(d-distance)<1e-8&&cell.height>owner.height)){owner=cell;distance=d;}
+			}
+			let out=groups.get(owner);if(!out){out=[];groups.set(owner,out);}
+			for(let k=0;k<30;k+=10) out.push(v[i+k]!+origin.x,v[i+k+1]!+origin.y,v[i+k+2]!+origin.height,v[i+k+3]!,v[i+k+4]!,owner.x,owner.y,v[i+k+7]!,v[i+k+8]!,v[i+k+9]!);
+		}
+		for(const [cell,vertices] of groups){mesh.parts.push({kind:"ground",cell,material:materials[material]!,vertices:new Float32Array(vertices)});mesh.triangles+=vertices.length/30;}
+	}
 }
 
 function triangle(out: number[], points: TerrainVertex[], image: TerrainImage | null): void {
@@ -91,7 +148,16 @@ export function build_tile_map(cells: TerrainCell[], tiles: TheaterTiles, assets
 	const mesh: TerrainMesh = { materials: [], parts: [], triangles: 0 };
 	const ids = new Map<string, number[]>(), lookup = new Map(cells.map(c=>[`${c.x},${c.y}`,c]));
 	const cliff_art = map_cliff_art(cells,tiles);
+	const covered=new Set<TerrainCell>();
+	for(const instance of tile_instances(cells,tiles,assets)) {
+		let materials=ids.get(instance.key);
+		if(!materials){materials=instance.asset.primitives.map((p,i)=>{
+			const id=mesh.materials.length;mesh.materials.push({key:`${instance.key}/${i}`,tile:null,extra:false,...p});return id;
+		});ids.set(instance.key,materials);}
+		append_instance(mesh,instance,materials);instance.members.forEach(c=>covered.add(c));
+	}
 	for (const cell of cells) {
+		if(covered.has(cell))continue;
 		const key = tile_key(tiles,cell.tile,cell.subtile), tile = fetch_subtile(tiles,cell.tile,cell.subtile);
 		const asset = assets.get(key);
 		const neighbors: Neighbors = OFFSETS.map(([dx,dy])=> {

@@ -10,7 +10,7 @@ function remaster_manifest(root: string) {
 			if(entry.isSymbolicLink())continue;
 			const path=prefix+entry.name, full=join(folder,entry.name);
 			if(entry.isDirectory())walk(full,`${path}/`);
-			else if(/^tiles\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/[0-9]+\.glb$/i.test(path)) {
+			else if(/^tiles\/[a-z0-9_.-]+\/[a-z0-9_.-]+\/(?:[0-9]+|tile)\.glb$/i.test(path)) {
 				const stat=statSync(full);files.push({path,revision:`${stat.mtimeMs}-${stat.size}`});
 			}
 		}

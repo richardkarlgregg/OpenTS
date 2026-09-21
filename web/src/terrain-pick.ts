@@ -3,12 +3,17 @@
 
 import { terrain_project, type TerrainCell, type TerrainMesh } from "./terrain-mesh";
 
+const bounds=new WeakMap<TerrainMesh["parts"][number],number[]>();
+
 /** Pick the frontmost visible triangle using the same orthographic depth as the renderer. */
-export function pick_terrain_cell(mesh: TerrainMesh, x: number, y: number, mapped: (x:number,y:number)=>boolean): TerrainCell | null {
-	let selected: TerrainCell | null = null, depth = -Infinity;
+export function pick_terrain_point(mesh: TerrainMesh, x: number, y: number, mapped: (x:number,y:number)=>boolean): {cell:TerrainCell;point:[number,number,number]} | null {
+	let selected: {cell:TerrainCell;point:[number,number,number]} | null = null, depth = -Infinity;
 	for(const part of mesh.parts) {
 		if(!mapped(part.cell.x,part.cell.y)) continue;
 		const v=part.vertices;
+		let box=bounds.get(part);
+		if(!box){box=[Infinity,Infinity,-Infinity,-Infinity];for(let i=0;i<v.length;i+=10){const [px,py]=terrain_project(v[i]!,v[i+1]!,v[i+2]!);box[0]=Math.min(box[0]!,px);box[1]=Math.min(box[1]!,py);box[2]=Math.max(box[2]!,px);box[3]=Math.max(box[3]!,py);}bounds.set(part,box);}
+		if(x<box[0]!||y<box[1]!||x>box[2]!||y>box[3]!)continue;
 		for(let i=0;i<v.length;i+=30) {
 			const p=[0,10,20].map(k=>terrain_project(v[i+k]!,v[i+k+1]!,v[i+k+2]!));
 			const [a,b,c]=p as [[number,number],[number,number],[number,number]];
@@ -26,8 +31,12 @@ export function pick_terrain_cell(mesh: TerrainMesh, x: number, y: number, mappe
 				const py=Math.max(0,Math.min(image.height-1,Math.floor(interpolate(4)*image.height)));
 				if((image.getContext("2d")?.getImageData(px,py,1,1).data[3]??255)<128) continue;
 			}
-			depth=z; selected=part.cell;
+			depth=z; selected={cell:part.cell,point:[interpolate(0),interpolate(1),interpolate(2)]};
 		}
 	}
 	return selected;
+}
+
+export function pick_terrain_cell(mesh:TerrainMesh,x:number,y:number,mapped:(x:number,y:number)=>boolean):TerrainCell|null {
+	return pick_terrain_point(mesh,x,y,mapped)?.cell??null;
 }

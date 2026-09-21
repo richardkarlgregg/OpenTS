@@ -171,7 +171,7 @@ const cliffImage=corner.materials[corner.parts.find(p=>p.kind==='closure').mater
 assert.equal(cliffImage.indices[(42-cliffImage.top)*cliffImage.width+36-cliffImage.left],2,'Cliff face uses extra artwork from a different neighboring TMP file');
 console.log('Clean topology checks passed: 2,646 ramp/height boundary pairs, exact shared-edge coverage, cardinal cliff normals, no flat-grid walls, TMP cliff export parity.');
 
-const {pick_terrain_cell}=require('../src/terrain-pick.ts');
+const {pick_terrain_cell,pick_terrain_point}=require('../src/terrain-pick.ts');
 const clickCells=[cell(3,4,4),cell(4,4,0)];
 const clickMesh=build_tile_map(clickCells,tiles);
 const wallPixel=terrain_project(4,4.5,2);
@@ -192,3 +192,28 @@ assert.equal(tile_key(named,65535,0),'clear01.tem/0');
 assert.equal(tile_key(named,-1,0),'clear01.tem/0');
 assert.equal(tile_key(named,0,21),'clear01.tem/0');
 console.log('Tile selection checks passed: projected ground and cliff picking, shroud, empty space, and canonical clear-tile identity.');
+
+const {tile_records,tile_set_key,tile_instances}=require('../src/terrain-tiles.ts');
+const assemblyTiles={...tiles,names:['CLIFF17.TEM'],sets:[Array.from({length:4},(_,subtile)=>({...tile(0),location:{x:subtile%2,y:Math.floor(subtile/2)},record_height:subtile%2?0:4}))]};
+const records=tile_records(assemblyTiles,0), assemblyData=[];
+for(const r of records){const v=tile_prototype(assemblyTiles,0,r.subtile).slice();for(let i=0;i<v.length;i+=10){v[i]+=r.x;v[i+1]+=r.y;v[i+2]+=r.height;}assemblyData.push(...v);}
+assert.equal(assemblyData.length/30,12,'CLIFF17 footprint has four ground quads and two cliff quads');
+const assemblyAsset={primitives:[{vertices:new Float32Array(assemblyData)}]};
+const assemblyAssets=new Map([['cliff17.tem/tile',assemblyAsset],['cliff17.tem/2',{primitives:[{vertices:tile_template(tile(0))}]}]]);
+const first=records.map(r=>({...r,x:r.x+20,y:r.y+30,height:r.height+6}));
+const second=records.map(r=>({...r,x:r.x+40,y:r.y+50,height:r.height+2}));
+const placements=tile_instances([...second,...first].reverse(),assemblyTiles,assemblyAssets);
+assert.equal(placements.length,2,'One replacement per full TMP occurrence, not per subtile');
+const assembledStamp=build_tile_map([...first,...second],assemblyTiles,assemblyAssets);
+assert.equal(assembledStamp.triangles,24,'A full piece takes precedence over legacy subtile models without duplication');
+const pointSet=new Set(assembledStamp.parts.flatMap(p=>{const points=[];for(let i=0;i<p.vertices.length;i+=10)points.push([p.vertices[i],p.vertices[i+1],p.vertices[i+2]].join(','));return points;}));
+for(const origin of [[20,30,6],[40,50,2]])for(let i=0;i<assemblyData.length;i+=10)assert.ok(pointSet.has([assemblyData[i]+origin[0],assemblyData[i+1]+origin[1],assemblyData[i+2]+origin[2]].join(',')),'TMP height and grid offsets are applied once');
+assert.equal(tile_instances(first.slice(1),assemblyTiles,assemblyAssets).length,0,'Partial stamps must not create phantom cells');
+assert.equal(tile_instances(first.map((c,i)=>i===1?{...c,height:c.height+1}:c),assemblyTiles,assemblyAssets).length,0,'Edited map heights retain fallback geometry');
+assert.ok(build_tile_map(first.slice(1),assemblyTiles,assemblyAssets).parts.every(p=>p.cell!==first[0]),'Missing members stay absent');
+assert.equal(tile_set_key(assemblyTiles,65535),'cliff17.tem','Default tile identity is normalized for full pieces');
+console.log('Full TMP checks passed: 2x2 cliff layout, 12 triangles, two independent placements, no duplicate replacements, height offsets, and partial-map fallback.');
+
+const wallHit=pick_terrain_point(clickMesh,...wallPixel,()=>true);
+assert.ok(wallHit&&wallHit.point.every((v,i)=>Math.abs(v-[4,4.5,2][i])<1e-6),'Cursor light hit must interpolate the visible cliff, not the cell center');
+console.log('Cursor hit checks passed: exact visible cliff intersection.');

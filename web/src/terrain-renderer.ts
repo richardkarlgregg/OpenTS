@@ -5,8 +5,10 @@ import type { TheaterTiles } from "./isotile";
 import { terrain_image } from "./terrain-art";
 import { shade_palette, type CellLight } from "./light";
 import { DSurface, unpack_hicolor } from "./surface";
-import { TERRAIN_LEVEL, type TerrainCell, type TerrainMesh } from "./terrain-mesh";
+import { TERRAIN_LEVEL, type TerrainCell, type TerrainMesh, type TerrainSurface } from "./terrain-mesh";
 import { build_tile_map, type TileAssets } from "./terrain-tiles";
+
+import { pick_terrain_point } from "./terrain-pick";
 
 type AtlasSlot = { page: number; x: number; y: number; width: number; height: number };
 type Batch = { vao: WebGLVertexArrayObject; buffer: WebGLBuffer; count: number; page: number; minx: number; miny: number; maxx: number; maxy: number };
@@ -14,10 +16,14 @@ const ATLAS_SIZE = 2048;
 const SHADOW_SIZE = 2048;
 export type TerrainSettings = {
 	textures: boolean; lighting: boolean; shadows: boolean; map_tint: boolean;
+	normal_maps: boolean; roughness: boolean; metallic: boolean; occlusion: boolean; emissive: boolean; replacements: boolean;
+	cursor_light: boolean; cursor_height: number; cursor_radius: number; cursor_intensity: number; normal_strength: number;
 	wireframe: boolean; normals: boolean; azimuth: number; elevation: number; ambient: number;
 };
 export function terrain_defaults(): TerrainSettings {
 	return { textures: true, lighting: true, shadows: true, map_tint: true,
+		normal_maps:true,roughness:true,metallic:true,occlusion:true,emissive:true,replacements:true,
+		cursor_light:false,cursor_height:2,cursor_radius:8,cursor_intensity:10,normal_strength:1,
 		wireframe: false, normals: false, azimuth: 235, elevation: 50, ambient: 0.45 };
 }
 const VERTEX = `#version 300 es
@@ -67,6 +73,20 @@ uniform bool show_wireframe;
 uniform bool show_normals;
 uniform sampler2D normalmap;
 uniform bool use_normalmap;
+uniform vec2 normal_scale;
+uniform float normal_strength;
+uniform sampler2D ormmap;
+uniform sampler2D emissivemap;
+uniform vec3 emissive_factor;
+uniform bool use_pbr;
+uniform bool use_roughness;
+uniform bool use_metallic;
+uniform bool use_occlusion;
+uniform bool use_emissive;
+uniform bool use_cursor;
+uniform vec3 cursor_position;
+uniform float cursor_radius;
+uniform float cursor_intensity;
 out vec4 color;
 float sunlight() {
  if(!use_shadows || any(lessThan(shadowcoord,vec3(0.0))) || any(greaterThan(shadowcoord,vec3(1.0)))) return 1.0;
@@ -83,6 +103,16 @@ float sunlight() {
  }
  return lit/9.0;
 }
+vec3 linear_color(vec3 c) {return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4)),step(vec3(0.04045),c));}
+vec3 display_color(vec3 c) {c=max(c,vec3(0.0));return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,step(vec3(0.0031308),c));}
+vec3 surface_light(vec3 n,vec3 l,vec3 base,float rough,float metal) {
+ vec3 v=normalize(vec3(1.0,1.0,0.816496580927726)),h=normalize(v+l);
+ float nl=max(dot(n,l),0.0),nv=max(dot(n,v),0.001),nh=max(dot(n,h),0.0),vh=max(dot(v,h),0.0);
+ float a=rough*rough,a2=a*a,d=a2/(3.14159265*pow(nh*nh*(a2-1.0)+1.0,2.0));
+ float k=pow(rough+1.0,2.0)/8.0,g=(nv/(nv*(1.0-k)+k))*(nl/(nl*(1.0-k)+k));
+ vec3 f0=mix(vec3(0.04),base,metal),f=f0+(1.0-f0)*pow(1.0-vh,5.0);
+ return ((1.0-f)*(1.0-metal)*base/3.14159265+d*g*f/max(4.0*nv*nl,0.001))*nl*3.14159265;
+}
 void main() {
  vec4 state=texelFetch(cellstate,cellcoord-cellorigin,0);
  if(state.a<0.5) discard;
@@ -97,13 +127,31 @@ void main() {
    vec3 tangent=normalize((dx*ty.y-dy*tx.y)/determinant);
    tangent=normalize(tangent-n*dot(n,tangent));
    vec3 bitangent=normalize(cross(n,tangent))*sign(dot(cross(n,tangent),(dy*tx.x-dx*ty.x)/determinant));
-   n=normalize(mat3(tangent,bitangent,n)*(texture(normalmap,texcoord).rgb*2.0-1.0));
+   vec3 detail=texture(normalmap,texcoord).rgb*2.0-1.0;
+   detail.xy*=normal_scale*normal_strength;
+   n=normalize(mat3(tangent,bitangent,n)*normalize(detail));
   }
  }
  float incidence=max(0.0,dot(n,sundirection));
  float light=use_lighting?ambient+(1.0-ambient)*incidence*sunlight():1.0;
  vec3 base=use_textures?texel.rgb:vec3(0.68,0.70,0.72);
- vec3 result=show_normals?n*0.5+0.5:base*(use_map_tint?state.rgb:vec3(1.0))*light;
+ vec3 tint=use_map_tint?state.rgb:vec3(1.0),result=base*tint*light;
+ vec3 orm=texture(ormmap,texcoord).rgb;
+ float rough=use_roughness?clamp(orm.g,0.045,1.0):1.0,metal=use_metallic?orm.b:0.0,ao=use_occlusion?orm.r:1.0;
+ vec3 linear_base=linear_color(base)*linear_color(tint),radiance=linear_base;
+ if(use_pbr && use_lighting)radiance=linear_base*ambient*ao*(1.0-metal)+surface_light(n,sundirection,linear_base,rough,metal)*(1.0-ambient)*sunlight();
+ if(use_cursor) {
+  vec3 delta=cursor_position-worldposition;float distance=length(delta);
+  float attenuation=pow(max(0.0,1.0-pow(distance/cursor_radius,4.0)),2.0)*cursor_intensity/(1.0+distance*distance);
+  vec3 l=delta/max(distance,0.0001);
+  if(use_pbr)radiance+=surface_light(n,l,linear_base,rough,metal)*attenuation;
+  else result+=base*tint*max(0.0,dot(n,l))*attenuation;
+ }
+ if(use_pbr) {
+  if(use_emissive)radiance+=linear_color(texture(emissivemap,texcoord).rgb)*emissive_factor;
+  result=display_color(radiance);
+ }
+ if(show_normals)result=n*0.5+0.5;
  if(show_wireframe) {
   vec3 edge=smoothstep(vec3(0.0),fwidth(barycentric)*1.2,barycentric);
   result=mix(vec3(0.05,0.8,0.9),result,min(edge.x,min(edge.y,edge.z)));
@@ -159,21 +207,21 @@ function program(gl: WebGL2RenderingContext, vertex: string, fragment: string): 
 	return result;
 }
 
-function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanvasElement[]; slots: AtlasSlot[]; normals: (HTMLCanvasElement|null)[] } {
+function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanvasElement[]; slots: AtlasSlot[]; surfaces: (TerrainSurface|null)[] } {
 	const pages: HTMLCanvasElement[] = [];
-	const normals: (HTMLCanvasElement|null)[] = [];
+	const surfaces: (TerrainSurface|null)[] = [];
 	const slots: AtlasSlot[] = [];
 	const shared = new WeakMap<Uint8Array, AtlasSlot>();
 	let x = 2, y = 2, row = 0, page_index = 0;
 	const new_page = (): void => {
 		const canvas = document.createElement("canvas"); canvas.width = canvas.height = ATLAS_SIZE;
-		pages.push(canvas); normals.push(null); page_index=pages.length-1; x = y = 2; row = 0;
+		pages.push(canvas); surfaces.push(null); page_index=pages.length-1; x = y = 2; row = 0;
 	};
 	new_page();
 	for (const material of mesh.materials) {
 		if(material.image) {
 			slots.push({page:pages.length,x:0,y:0,width:material.image.width,height:material.image.height});
-			pages.push(material.image); normals.push(material.normal_image??null); continue;
+			pages.push(material.image); surfaces.push(material); continue;
 		}
 		const extra = material.extra ? material.tile?.extra : null;
 		const source = material.source ?? extra ?? (material.tile ? terrain_image(material.tile) : null);
@@ -196,7 +244,7 @@ function make_atlas(mesh: TerrainMesh, palette: Uint16Array): { pages: HTMLCanva
 		slots.push(slot); if (source) shared.set(source.indices,slot);
 		x += width + 4; row = Math.max(row, height);
 	}
-	return { pages, slots, normals };
+	return { pages, slots, surfaces };
 }
 
 export class TerrainRenderer {
@@ -220,6 +268,13 @@ export class TerrainRenderer {
 	private readonly atlas_textures: WebGLTexture[] = [];
 	private readonly normal_textures: (WebGLTexture|null)[] = [];
 	private readonly flat_normal: WebGLTexture;
+	private readonly flat_orm: WebGLTexture;
+	private readonly flat_emissive: WebGLTexture;
+	private readonly orm_textures:(WebGLTexture|null)[]=[];
+	private readonly emissive_textures:(WebGLTexture|null)[]=[];
+	private readonly surfaces:(TerrainSurface|null)[];
+	private cursor_key="";
+	private cursor_hit:ReturnType<typeof pick_terrain_point>=null;
 	private readonly state_texture: WebGLTexture;
 	private readonly black_texture: WebGLTexture;
 	private readonly white_texture: WebGLTexture;
@@ -246,13 +301,17 @@ export class TerrainRenderer {
 		this.terrain_program = program(gl, VERTEX, FRAGMENT);
 		this.composite_program = program(gl, QUAD_VERTEX, COMPOSITE);
 		this.shadow_program = program(gl, SHADOW_VERTEX, SHADOW_FRAGMENT);
-		this.mesh = build_tile_map(cells, tiles, assets);
+		this.mesh = build_tile_map(cells, tiles,settings.replacements?assets:new Map());
 		const atlas = make_atlas(this.mesh, palette);
 		this.pages = atlas.pages; this.slots = atlas.slots;
 		this.flat_normal=this.texture(); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,128,255,255]));
-		for(const image of atlas.normals) {
-			if(!image){this.normal_textures.push(null);continue;}
-			this.normal_textures.push(this.texture());gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,image);
+		this.surfaces=atlas.surfaces;
+		this.flat_orm=this.texture();gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,0,255]));
+		this.flat_emissive=this.texture();gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,255,255]));
+		for(const surface of atlas.surfaces)for(const [image,list] of [[surface?.normal_image,this.normal_textures],[surface?.orm_image,this.orm_textures],[surface?.emissive_image,this.emissive_textures]] as const) {
+			if(!image){list.push(null);continue;}
+			list.push(this.texture());gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,image);
+			gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
 		}
 		this.minx = cells.reduce((v, c) => Math.min(v, c.x), Infinity);
 		this.miny = cells.reduce((v, c) => Math.min(v, c.y), Infinity);
@@ -272,10 +331,11 @@ export class TerrainRenderer {
 		for (const texture of [this.black_texture, this.white_texture]) {
 			gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 640, 400, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 		}
-		for (const page of this.pages) {
+		for (const [pageIndex,page] of this.pages.entries()) {
 			if(Math.max(page.width,page.height)>gl.getParameter(gl.MAX_TEXTURE_SIZE))throw new Error("Replacement texture exceeds GPU limits");
 			this.atlas_textures.push(this.texture());
 			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, page);
+			if(this.surfaces[pageIndex]){gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);}
 		}
 		this.target_texture = this.texture();
 		this.target = gl.createFramebuffer()!; this.depth = gl.createRenderbuffer()!;
@@ -380,7 +440,7 @@ export class TerrainRenderer {
 	}
 
 	render(origin: { x: number; y: number }, width: number, height: number, black: DSurface, white: DSurface,
-		mapped: (x: number, y: number) => boolean): HTMLCanvasElement {
+		mapped: (x: number, y: number) => boolean, cursor?:{x:number;y:number}): HTMLCanvasElement {
 		if (this.lost || this.gl.isContextLost()) throw new Error("The GPU context was lost; switched to legacy graphics.");
 		const gl = this.gl;
 		width = Math.max(1, Math.round(width)); height = Math.max(1, Math.round(height));
@@ -403,6 +463,12 @@ export class TerrainRenderer {
 			gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, this.state_width, this.state_height, gl.RGBA, gl.UNSIGNED_BYTE, this.state);
 		}
 		this.update_shadows();
+		const cursor_active=this.settings.cursor_light&&cursor&&cursor.x>=0&&cursor.x<472&&cursor.y>=16&&cursor.y<400;
+		const cursor_key=cursor_active?String([cursor.x+origin.x,cursor.y-16+origin.y]):"";
+		if(cursor_key!==this.cursor_key||changed) {
+			this.cursor_key=cursor_key;
+			this.cursor_hit=cursor_active?pick_terrain_point(this.mesh,cursor.x+origin.x,cursor.y-16+origin.y,mapped):null;
+		}
 		gl.bindFramebuffer(gl.FRAMEBUFFER, this.target); gl.viewport(0, 0, width, height);
 		gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 		gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
@@ -416,15 +482,27 @@ export class TerrainRenderer {
 		gl.uniform3f(gl.getUniformLocation(prog, "sundirection"), this.sundirection[0]!, this.sundirection[1]!, this.sundirection[2]!);
 		gl.uniform1f(gl.getUniformLocation(prog, "ambient"), this.settings.ambient);
 		for (const [name, value] of Object.entries({ use_textures: this.settings.textures, use_lighting: this.settings.lighting,
-			use_shadows: this.settings.shadows, use_map_tint: this.settings.map_tint, show_wireframe: this.settings.wireframe, show_normals: this.settings.normals })) {
+			use_shadows: this.settings.shadows, use_map_tint: this.settings.map_tint, show_wireframe: this.settings.wireframe, show_normals: this.settings.normals, use_roughness:this.settings.roughness,use_metallic:this.settings.metallic,use_occlusion:this.settings.occlusion,use_emissive:this.settings.emissive })) {
 			gl.uniform1i(gl.getUniformLocation(prog, name), value ? 1 : 0);
 		}
+		gl.uniform1i(gl.getUniformLocation(prog,"use_cursor"),cursor_active&&this.cursor_hit?1:0);
+		const hit=this.cursor_hit?.point??[0,0,0],lift=this.settings.cursor_height;
+		gl.uniform3f(gl.getUniformLocation(prog,"cursor_position"),hit[0]!+lift/(2*TERRAIN_LEVEL),hit[1]!+lift/(2*TERRAIN_LEVEL),hit[2]!*TERRAIN_LEVEL+lift);
+		gl.uniform1f(gl.getUniformLocation(prog,"cursor_radius"),this.settings.cursor_radius);
+		gl.uniform1f(gl.getUniformLocation(prog,"cursor_intensity"),this.settings.cursor_intensity);
+		gl.uniform1f(gl.getUniformLocation(prog,"normal_strength"),this.settings.normal_strength);
 		this.bind(this.shadow_texture, 3, prog, "shadowmap");
 		this.bind(this.state_texture, 1, prog, "cellstate");
 		for (const batch of this.batches) {
 			if (batch.maxx < origin.x || batch.minx > origin.x + 472 || batch.maxy < origin.y || batch.miny > origin.y + 384) continue;
+			const surface=this.surfaces[batch.page];
+			this.bind(this.orm_textures[batch.page]??this.flat_orm,5,prog,"ormmap");
+			this.bind(this.emissive_textures[batch.page]??this.flat_emissive,6,prog,"emissivemap");
+			gl.uniform1i(gl.getUniformLocation(prog,"use_pbr"),surface?.pbr?1:0);
+			gl.uniform2f(gl.getUniformLocation(prog,"normal_scale"),...(surface?.normal_scale??[1,1] as [number,number]));
+			gl.uniform3f(gl.getUniformLocation(prog,"emissive_factor"),...(surface?.emissive_factor??[0,0,0] as [number,number,number]));
 			this.bind(this.normal_textures[batch.page]??this.flat_normal,4,prog,"normalmap");
-			gl.uniform1i(gl.getUniformLocation(prog,"use_normalmap"),this.normal_textures[batch.page]?1:0);
+			gl.uniform1i(gl.getUniformLocation(prog,"use_normalmap"),this.settings.normal_maps&&this.normal_textures[batch.page]?1:0);
 			this.bind(this.atlas_textures[batch.page]!, 0, prog, "atlas"); gl.bindVertexArray(batch.vao); gl.drawArrays(gl.TRIANGLES, 0, batch.count);
 		}
 		gl.bindVertexArray(null); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.DEPTH_TEST);
@@ -477,10 +555,26 @@ export class TerrainRenderer {
 			nodes.push({ name, mesh: meshes.length - 1, translation: [part.cell.x, part.cell.height * TERRAIN_LEVEL, -part.cell.y], extras: { theater, tile: part.cell.tile, subtile: part.cell.subtile, material: this.mesh.materials[part.material]!.key } });
 			if (nodes.length % 64 === 0) yield nodes.length / this.mesh.parts.length;
 		}
+		const images=this.pages.map(p=>({uri:p.toDataURL("image/png")}));
+		const textures=this.pages.map((_,source)=>({source,sampler:0}));
+		const add_image=(image:HTMLCanvasElement)=>{const source=images.length;images.push({uri:image.toDataURL("image/png")});textures.push({source,sampler:1});return textures.length-1;};
+		let emissive_extension=false;
+		const materials=this.pages.map((_,index)=>{
+			const surface=this.surfaces[index],orm=surface?.orm_image?add_image(surface.orm_image):undefined;
+			const strength=Math.max(1,...(surface?.emissive_factor??[0,0,0]));if(strength>1)emissive_extension=true;
+			return {name:theater+"-atlas-"+index,doubleSided:true,alphaMode:"MASK",
+				pbrMetallicRoughness:{baseColorTexture:{index},metallicFactor:orm===undefined?0:1,roughnessFactor:1,metallicRoughnessTexture:orm===undefined?undefined:{index:orm}},
+				normalTexture:surface?.normal_image?{index:add_image(surface.normal_image),scale:surface.normal_scale?.[0]??1}:undefined,
+				occlusionTexture:orm===undefined?undefined:{index:orm},
+				emissiveTexture:surface?.emissive_image?{index:add_image(surface.emissive_image)}:undefined,
+				emissiveFactor:surface?.emissive_factor?.map(v=>v/strength),
+				extensions:strength>1?{KHR_materials_emissive_strength:{emissiveStrength:strength}}:undefined
+			};
+		});
 		const gltf = { asset: { version: "2.0", generator: "OpenTS browser terrain" }, scene: 0, scenes: [{ nodes: nodes.map((_, i) => i) }], nodes, meshes,
-			buffers, bufferViews: views, accessors, images: this.pages.map(p => ({ uri: p.toDataURL("image/png") })),
-			textures: this.pages.map((_, source) => ({ source, sampler: 0 })), samplers: [{ magFilter: 9728, minFilter: 9728, wrapS: 33071, wrapT: 33071 }],
-			materials: this.pages.map((_, index) => ({ name: `${theater}-atlas-${index}`, doubleSided: true, alphaMode: "MASK", pbrMetallicRoughness: { baseColorTexture: { index }, metallicFactor: 0, roughnessFactor: 1 } })) };
+			buffers, bufferViews: views, accessors, images,textures,extensionsUsed:emissive_extension?["KHR_materials_emissive_strength"]:undefined,
+			samplers:[{magFilter:9728,minFilter:9728,wrapS:33071,wrapT:33071},{magFilter:9729,minFilter:9729,wrapS:33071,wrapT:33071}],materials };
+
 		return gltf;
 	}
 

@@ -22,7 +22,7 @@ export class TerrainControls {
 
 	constructor(canvas: HTMLCanvasElement, settings: TerrainSettings, private readonly theater: string,
 		private readonly renderer: () => TerrainRenderer | null, toggle: () => void,
-		private readonly export_tiles?: (progress:(value:number)=>void,cancelled:()=>boolean)=>Promise<Blob>) {
+		private readonly export_tiles?: (progress:(value:number)=>void,cancelled:()=>boolean)=>Promise<Blob>, private readonly changed?:()=>void) {
 		this.element.className = "terrain-tools";
 		this.element.setAttribute("aria-label", "Terrain graphics");
 		this.mode.type = "button"; this.mode.onclick = toggle;
@@ -37,26 +37,28 @@ export class TerrainControls {
 		bar.append(this.mode, this.tile_button, this.export_button, this.save, this.status);
 		const summary = document.createElement("summary"); summary.textContent = "Terrain debug";
 		const fields = document.createElement("div"); fields.className = "terrain-debug-fields";
-		const note = document.createElement("p"); note.textContent = "Enable Remaster to preview these settings. Shadows affect terrain meshes; sprites keep their original shadows.";
+		const note = document.createElement("p"); note.textContent = "Enable Remaster to preview these settings. Sun shadows affect terrain meshes; sprites keep their original shadows. The cursor light previews baked details without casting shadows. Replacement changes apply immediately.";
 		const checkbox = (key: keyof TerrainSettings, title: string): void => {
 			const label = document.createElement("label"), input = document.createElement("input");
 			input.type = "checkbox"; input.checked = Boolean(settings[key]);
-			input.onchange = () => { Object.assign(settings, { [key]: input.checked }); };
+			input.onchange = () => { Object.assign(settings, { [key]: input.checked }); this.changed?.(); this.refresh.forEach(fn=>fn()); };
 			this.refresh.push(() => { input.checked = Boolean(settings[key]); });
 			label.append(input, ` ${title}`); fields.append(label);
 		};
-		checkbox("textures", "Textures"); checkbox("lighting", "Directional lighting"); checkbox("shadows", "Terrain shadows");
+		checkbox("replacements", "Replacement tiles / assets");
+		checkbox("textures", "Base color / diffuse");checkbox("normal_maps","Normal maps");checkbox("roughness","Roughness");checkbox("metallic","Metallic");checkbox("occlusion","Ambient occlusion");checkbox("emissive","Emission");checkbox("cursor_light","Light follows cursor"); checkbox("lighting", "Directional lighting"); checkbox("shadows", "Terrain shadows");
 		checkbox("map_tint", "Map lighting / tint"); checkbox("wireframe", "Wireframe"); checkbox("normals", "Surface normals");
-		const slider = (key: "azimuth" | "elevation" | "ambient", title: string, min: number, max: number, step: number): void => {
+		const slider = (key: "azimuth" | "elevation" | "ambient" | "normal_strength" | "cursor_height" | "cursor_radius" | "cursor_intensity", title: string, min: number, max: number, step: number): void => {
 			const label = document.createElement("label"), input = document.createElement("input"), value = document.createElement("output");
 			input.type = "range"; input.min = String(min); input.max = String(max); input.step = String(step);
-			const sync = () => { input.value = String(settings[key]); value.textContent = key === "ambient" ? `${Math.round(settings[key] * 100)}%` : `${settings[key]}°`; };
+			const sync = () => { input.value = String(settings[key]); value.textContent = key === "ambient" ? `${Math.round(settings[key] * 100)}%` : ["azimuth","elevation"].includes(key)?`${settings[key]}°`:String(settings[key]); };
 			input.oninput = () => { settings[key] = Number(input.value); sync(); };
 			this.refresh.push(sync); sync(); label.append(`${title} `, input, value); fields.append(label);
 		};
 		slider("azimuth", "Sun direction", 0, 360, 5); slider("elevation", "Sun elevation", 10, 85, 5); slider("ambient", "Ambient light", 0.1, 1, 0.05);
+		slider("normal_strength","Normal strength",0,3,.1);slider("cursor_height","Cursor light height",.25,6,.25);slider("cursor_radius","Cursor light range",1,20,1);slider("cursor_intensity","Cursor light intensity",0,25,.5);
 		const reset = document.createElement("button"); reset.type = "button"; reset.textContent = "Reset lighting and debug";
-		reset.onclick = () => { Object.assign(settings, terrain_defaults()); this.refresh.forEach(fn => fn()); };
+		reset.onclick = () => { Object.assign(settings, terrain_defaults()); this.changed?.(); this.refresh.forEach(fn => fn()); };
 		fields.append(reset); this.debug.append(summary, note, fields); this.element.append(bar, this.debug);
 		this.tile_menu.className="terrain-tile-menu"; this.tile_menu.hidden=true;
 		this.tile_menu.setAttribute("role","dialog"); this.tile_menu.setAttribute("aria-label","Terrain tile");
@@ -84,9 +86,9 @@ export class TerrainControls {
 		if(this.disposed) return;
 		const title=document.createElement("strong"), destination=document.createElement("p"), help=document.createElement("p"), close=document.createElement("button");
 		title.textContent=name; destination.textContent=`Save edited GLB to: ${path}`;
-		help.textContent="Keep the tile origin and scale. Reload the mission to use it for all matching tiles in Remaster mode.";
+		help.textContent="Exports the complete TMP piece, including upper and lower cells. Keep the assembly origin and scale. Reload the mission to replace matching pieces in Remaster mode.";
 		const selection:TileExport={name,path,export:exporter};
-		this.selected_export.type="button"; this.selected_export.textContent="Export this tile (PNG + GLB)";
+		this.selected_export.type="button"; this.selected_export.textContent="Export complete tile (PNG + GLB)";
 		this.selected_export.disabled=this.exporting;
 		this.selected_export.onclick=()=>{void this.prepare_export(true,selection);};
 		close.type="button"; close.textContent="Close"; close.onclick=()=>this.close_tile();

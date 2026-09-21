@@ -20,9 +20,14 @@ game.
 - Keep the legacy software 565 renderer. V toggles the independent WebGL2
   terrain renderer; see `TERRAIN.md`. Keep gameplay math and map formats
   independent of this presentation choice.
-- In Remaster mode, right-clicking tactical terrain opens individual tile export.
+- In Remaster mode, right-clicking tactical terrain exports the complete TMP footprint.
   Escape retains mode cancellation. The panel shows the GLB replacement path;
-  mission loading discovers matching files under `public/remaster/`.
+  mission loading discovers `tiles/<theater>/<TMP>/tile.glb` under `public/remaster/`
+  and places it once per complete matching footprint. Older numbered subtiles
+  retain their legacy coordinate convention and remain fallbacks.
+- Terrain GLBs support Base Color, tangent normal, ORM and emissive maps (UV0),
+  including material factors. Debug offers independent material channels, a cursor
+  point light and immediate replacement/generated comparison; see `TERRAIN.md`.
 - After MIX files are indexed the page runs the graphical menu from
   `NewMenu.INI` when `GMENU.MIX` is present, otherwise the old
   `IDD_MAIN_MENU` dialog from `language.rc`. New Campaign runs

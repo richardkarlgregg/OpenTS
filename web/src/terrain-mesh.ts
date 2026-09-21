@@ -6,7 +6,11 @@ import { terrain_image, terrain_uv, TerrainCoverage, type TerrainImage } from ".
 
 export type TerrainCell = { x: number; y: number; height: number; tile: number; subtile: number };
 export type TerrainVertex = [number, number, number];
-export type TerrainMaterial = { key: string; tile: IsoSubtile | null; extra: boolean; source?: TerrainImage; image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement };
+export type TerrainSurface = {
+	image?: HTMLCanvasElement; normal_image?: HTMLCanvasElement; orm_image?: HTMLCanvasElement; emissive_image?: HTMLCanvasElement;
+	normal_scale?: [number,number]; emissive_factor?: [number,number,number]; pbr?: boolean;
+};
+export type TerrainMaterial = TerrainSurface & { key: string; tile: IsoSubtile | null; extra: boolean; source?: TerrainImage };
 export type TerrainPart = { kind: "ground" | "closure" | "relief"; material: number; vertices: Float32Array; cell: TerrainCell };
 export type TerrainMesh = { materials: TerrainMaterial[]; parts: TerrainPart[]; triangles: number };
 
