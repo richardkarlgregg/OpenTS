@@ -178,7 +178,7 @@ function material_orm(material:MeshStandardMaterial):HTMLCanvasElement {
 	ctx.putImageData(pixels,0,0);return canvas;
 }
 
-export async function import_tile_glb(bytes:ArrayBuffer,stamp=false):Promise<TileAsset> {
+export async function import_tile_glb(bytes:ArrayBuffer,stamp=false,expected_name?:string):Promise<TileAsset> {
 	const view=new DataView(bytes);
 	if(bytes.byteLength<20||bytes.byteLength>100*1048576||view.getUint32(0,true)!==0x46546c67||view.getUint32(4,true)!==2||view.getUint32(8,true)!==bytes.byteLength)throw new Error("Expected a glTF 2.0 binary tile under 100 MB");
 	const length=view.getUint32(12,true);
@@ -187,10 +187,20 @@ export async function import_tile_glb(bytes:ArrayBuffer,stamp=false):Promise<Til
 	if((json.buffers??[]).some((b:{uri?:string})=>b.uri)|| (json.images??[]).some((i:{uri?:string})=>i.uri))throw new Error("Embed buffers and images in the GLB");
 	if(json.animations?.length||json.skins?.length||json.extensionsRequired?.some((name:string)=>name!=="KHR_materials_emissive_strength"))throw new Error("Export static tiles without compression or required extensions");
 	const gltf=await new GLTFLoader().parseAsync(bytes,""); gltf.scene.updateMatrixWorld(true);
+	const named:typeof gltf.scene[]=[];
+	if(expected_name)gltf.scene.traverse(object=>{if(String(object.userData.name??object.name).toLowerCase()===expected_name.toLowerCase())named.push(object as typeof gltf.scene);});
+	const root=named[0]??gltf.scene;
 	const result:TileAsset={primitives:[],source:bytes}; let vertices=0;
 	const geometries=new Set<BufferGeometry>(), materials=new Set<MeshStandardMaterial>(), textures=new Set<Texture>();
 	try {
 		gltf.scene.traverse(object=>{
+			if(!(object instanceof Mesh))return;
+			geometries.add(object.geometry);
+			const mats=Array.isArray(object.material)?object.material:[object.material];
+			for(const material of mats){materials.add(material);for(const value of Object.values(material))if(value&&typeof value==="object"&&"isTexture" in value)textures.add(value as Texture);}
+		});
+		if(named.length>1)throw new Error("GLB contains multiple copies of "+expected_name+"; export only the intended piece");
+		root.traverse(object=>{
 			if(!(object instanceof Mesh))return;
 			if(object.type==="SkinnedMesh"||Object.keys(object.geometry.morphAttributes).length)throw new Error("Skinned and morphing tiles are unsupported");
 			geometries.add(object.geometry);
@@ -247,7 +257,7 @@ export async function load_tile_assets(theater:string,cells:TerrainCell[],tiles:
 			try {
 				const source=await fetch(`${import.meta.env.BASE_URL}remaster/${file.path}?v=${encodeURIComponent(file.revision)}`,{cache:"no-cache"});
 				if(!source.ok)throw new Error(`HTTP ${source.status}`);
-				assets.set(key,await import_tile_glb(await source.arrayBuffer(),key.endsWith("/tile")));
+				assets.set(key,await import_tile_glb(await source.arrayBuffer(),key.endsWith("/tile"),key.endsWith("/tile")?key.slice(0,-5):undefined));
 			} catch(error) {log(`Remaster tile ${key}: ${String(error)}. Using generated tile.`);}
 		}
 	} catch(error) {log(`Remaster assets unavailable: ${String(error)}. Using generated tiles.`);}

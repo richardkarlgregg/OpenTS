@@ -11,9 +11,10 @@ import { build_tile_map, type TileAssets } from "./terrain-tiles";
 import { pick_terrain_point } from "./terrain-pick";
 
 type AtlasSlot = { page: number; x: number; y: number; width: number; height: number };
-type Batch = { vao: WebGLVertexArrayObject; buffer: WebGLBuffer; count: number; page: number; minx: number; miny: number; maxx: number; maxy: number };
+type Batch = { vao: WebGLVertexArrayObject; buffer: WebGLBuffer; count: number; page: number; minx: number; miny: number; maxx: number; maxy: number; world_min:number[]; world_max:number[] };
 const ATLAS_SIZE = 2048;
 const SHADOW_SIZE = 2048;
+const CURSOR_SHADOW_SIZE = 512;
 export type TerrainSettings = {
 	textures: boolean; lighting: boolean; shadows: boolean; map_tint: boolean;
 	normal_maps: boolean; roughness: boolean; metallic: boolean; occlusion: boolean; emissive: boolean; replacements: boolean;
@@ -87,6 +88,7 @@ uniform bool use_cursor;
 uniform vec3 cursor_position;
 uniform float cursor_radius;
 uniform float cursor_intensity;
+uniform highp samplerCube cursor_shadowmap;
 out vec4 color;
 float sunlight() {
  if(!use_shadows || any(lessThan(shadowcoord,vec3(0.0))) || any(greaterThan(shadowcoord,vec3(1.0)))) return 1.0;
@@ -100,6 +102,24 @@ float sunlight() {
   vec2 offset=vec2(x,y)*step;
   float depth=texture(shadowmap,shadowcoord.xy+offset).r;
   lit+=shadowcoord.z+dot(slope,offset)-bias<=depth?1.0:0.0;
+ }
+ return lit/9.0;
+}
+float cursor_visibility(vec3 delta, float distance) {
+ if(!use_shadows || distance<0.025)return 1.0;
+ vec3 direction=-delta/distance;
+ vec3 side=normalize(cross(direction,abs(direction.z)<0.9?vec3(0,0,1):vec3(0,1,0)));
+ vec3 up=cross(side,direction);
+ // Bias follows the geometric surface, not the baked normal details.
+ vec3 plane=normalize(cross(dFdx(worldposition),dFdy(worldposition)));
+ float incidence=abs(dot(plane,-direction));
+ float bias=0.004+min(0.08,2.0*distance/${CURSOR_SHADOW_SIZE}.0*(1.0-incidence)/max(incidence,0.1)),lit=0.0;
+ for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++) {
+  vec3 ray=direction+(side*float(x)+up*float(y))*(1.5/${CURSOR_SHADOW_SIZE}.0);
+  float blocker=texture(cursor_shadowmap,ray).r*cursor_radius;
+  float denominator=dot(normalize(ray),plane);
+  float expected=abs(denominator)>0.0001?dot(-delta,plane)/denominator:distance;
+  lit+=expected<=0.0||expected-bias<=blocker?1.0:0.0;
  }
  return lit/9.0;
 }
@@ -143,6 +163,7 @@ void main() {
  if(use_cursor) {
   vec3 delta=cursor_position-worldposition;float distance=length(delta);
   float attenuation=pow(max(0.0,1.0-pow(distance/cursor_radius,4.0)),2.0)*cursor_intensity/(1.0+distance*distance);
+  attenuation*=cursor_visibility(delta,distance);
   vec3 l=delta/max(distance,0.0001);
   if(use_pbr)radiance+=surface_light(n,l,linear_base,rough,metal)*attenuation;
   else result+=base*tint*max(0.0,dot(n,l))*attenuation;
@@ -169,6 +190,22 @@ precision highp float;
 in vec2 texcoord;
 uniform sampler2D atlas;
 void main(){if(texture(atlas,texcoord).a<0.5)discard;}`;
+const CURSOR_SHADOW_VERTEX = `#version 300 es
+layout(location=0) in vec3 position;
+layout(location=1) in vec2 uv;
+uniform mat4 lightmatrix;
+out vec2 texcoord;
+out vec3 worldposition;
+void main(){worldposition=vec3(position.xy,position.z*${TERRAIN_LEVEL});gl_Position=lightmatrix*vec4(worldposition,1.0);texcoord=uv;}`;
+const CURSOR_SHADOW_FRAGMENT = `#version 300 es
+precision highp float;
+in vec2 texcoord;
+in vec3 worldposition;
+uniform sampler2D atlas;
+uniform vec3 cursor_position;
+uniform float cursor_radius;
+void main(){if(texture(atlas,texcoord).a<0.5)discard;gl_FragDepth=length(worldposition-cursor_position)/cursor_radius;}`;
+
 const QUAD_VERTEX = `#version 300 es
 out vec2 uv;
 void main(){vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));uv=vec2(p.x,1.0-p.y);gl_Position=vec4(p*2.0-1.0,0,1);}`;
@@ -273,6 +310,10 @@ export class TerrainRenderer {
 	private readonly orm_textures:(WebGLTexture|null)[]=[];
 	private readonly emissive_textures:(WebGLTexture|null)[]=[];
 	private readonly surfaces:(TerrainSurface|null)[];
+	private cursor_shadow_texture:WebGLTexture|null=null;
+	private cursor_shadow_target:WebGLFramebuffer|null=null;
+	private cursor_shadow_program:WebGLProgram|null=null;
+	private cursor_shadow_key="";
 	private cursor_key="";
 	private cursor_hit:ReturnType<typeof pick_terrain_point>=null;
 	private readonly state_texture: WebGLTexture;
@@ -304,6 +345,11 @@ export class TerrainRenderer {
 		this.mesh = build_tile_map(cells, tiles,settings.replacements?assets:new Map());
 		const atlas = make_atlas(this.mesh, palette);
 		this.pages = atlas.pages; this.slots = atlas.slots;
+		// A complete placeholder keeps the cube sampler valid before the light is enabled.
+		this.cursor_shadow_texture=gl.createTexture();if(!this.cursor_shadow_texture)throw new Error("Cannot allocate cursor shadow texture");
+		this.textures.push(this.cursor_shadow_texture);gl.bindTexture(gl.TEXTURE_CUBE_MAP,this.cursor_shadow_texture);
+		for(let face=0;face<6;face++)gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X+face,0,gl.DEPTH_COMPONENT24,1,1,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);
+		gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
 		this.flat_normal=this.texture(); gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([128,128,255,255]));
 		this.surfaces=atlas.surfaces;
 		this.flat_orm=this.texture();gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array([255,255,0,255]));
@@ -370,16 +416,18 @@ export class TerrainRenderer {
 				gl.enableVertexAttribArray(location!); gl.vertexAttribPointer(location!, size!, gl.FLOAT, false, 40, start! * 4);
 			}
 			let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+			const world_min=[Infinity,Infinity,Infinity],world_max=[-Infinity,-Infinity,-Infinity];
 			for (let i = 0; i < data.length; i += 10) {
 				for (let axis = 0; axis < 3; axis++) {
 					const value = data[i + axis]! * (axis === 2 ? TERRAIN_LEVEL : 1);
+					world_min[axis]=Math.min(world_min[axis]!,value);world_max[axis]=Math.max(world_max[axis]!,value);
 					this.bounds_min[axis] = Math.min(this.bounds_min[axis]!, value);
 					this.bounds_max[axis] = Math.max(this.bounds_max[axis]!, value);
 				}
 				const x = 24 * (data[i]! - data[i + 1]!), y = 12 * (data[i]! + data[i + 1]! - data[i + 2]!);
 				minx = Math.min(minx, x); maxx = Math.max(maxx, x); miny = Math.min(miny, y); maxy = Math.max(maxy, y);
 			}
-			this.batches.push({ vao, buffer, count: data.length / 10, page: group.page, minx, miny, maxx, maxy });
+			this.batches.push({ vao, buffer, count: data.length / 10, page: group.page, minx, miny, maxx, maxy, world_min,world_max });
 		}
 		gl.bindVertexArray(null);
 		} catch (error) {
@@ -439,6 +487,39 @@ export class TerrainRenderer {
 		this.shadow_key = key;
 	}
 
+	private update_cursor_shadows(position:number[]):void {
+		const gl=this.gl,radius=this.settings.cursor_radius,key=position.join(',')+'/'+radius;
+		if(key===this.cursor_shadow_key)return;
+		if(!this.cursor_shadow_program) {
+			gl.bindTexture(gl.TEXTURE_CUBE_MAP,this.cursor_shadow_texture);
+			for(let face=0;face<6;face++)gl.texImage2D(gl.TEXTURE_CUBE_MAP_POSITIVE_X+face,0,gl.DEPTH_COMPONENT24,CURSOR_SHADOW_SIZE,CURSOR_SHADOW_SIZE,0,gl.DEPTH_COMPONENT,gl.UNSIGNED_INT,null);
+			gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MIN_FILTER,gl.NEAREST);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+			for(const axis of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R])gl.texParameteri(gl.TEXTURE_CUBE_MAP,axis,gl.CLAMP_TO_EDGE);
+			this.cursor_shadow_target=gl.createFramebuffer();
+			this.cursor_shadow_program=program(gl,CURSOR_SHADOW_VERTEX,CURSOR_SHADOW_FRAGMENT);
+		}
+		const prog=this.cursor_shadow_program!;
+		gl.bindFramebuffer(gl.FRAMEBUFFER,this.cursor_shadow_target);gl.drawBuffers([gl.NONE]);gl.readBuffer(gl.NONE);
+		gl.viewport(0,0,CURSOR_SHADOW_SIZE,CURSOR_SHADOW_SIZE);gl.disable(gl.SCISSOR_TEST);gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);gl.useProgram(prog);
+		gl.uniform3f(gl.getUniformLocation(prog,'cursor_position'),position[0]!,position[1]!,position[2]!);
+		gl.uniform1f(gl.getUniformLocation(prog,'cursor_radius'),radius);
+		const nearby=this.batches.filter(batch=>position.reduce((sum,v,i)=>sum+Math.max(batch.world_min[i]!-v,0,v-batch.world_max[i]!)**2,0)<=radius*radius);
+		const faces=[[[1,0,0],[0,-1,0]],[[-1,0,0],[0,-1,0]],[[0,1,0],[0,0,1]],[[0,-1,0],[0,0,-1]],[[0,0,1],[0,-1,0]],[[0,0,-1],[0,-1,0]]];
+		for(const [face,[forward,up]] of faces.entries()) {
+			const f=forward!,u=up!,r=[f[1]!*u[2]!-f[2]!*u[1]!,f[2]!*u[0]!-f[0]!*u[2]!,f[0]!*u[1]!-f[1]!*u[0]!];
+			const dot=(v:number[])=>v.reduce((sum,x,i)=>sum+x*position[i]!,0),a=-(radius+.025)/(radius-.025),b=-2*radius*.025/(radius-.025);
+			// 90-degree perspective times a cube-face view; radial depth is written by the fragment shader.
+			const matrix=new Float32Array(16);
+			for(let i=0;i<3;i++){matrix[i*4]=r[i]!;matrix[i*4+1]=u[i]!;matrix[i*4+2]=-a*f[i]!;matrix[i*4+3]=f[i]!;}
+			matrix[12]=-dot(r);matrix[13]=-dot(u);matrix[14]=a*dot(f)+b;matrix[15]=-dot(f);
+			gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_CUBE_MAP_POSITIVE_X+face,this.cursor_shadow_texture,0);
+			if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error('Cannot allocate cursor shadow framebuffer');
+			gl.clear(gl.DEPTH_BUFFER_BIT);gl.uniformMatrix4fv(gl.getUniformLocation(prog,'lightmatrix'),false,matrix);
+			for(const batch of nearby){this.bind(this.atlas_textures[batch.page]!,0,prog,'atlas');gl.bindVertexArray(batch.vao);gl.drawArrays(gl.TRIANGLES,0,batch.count);}
+		}
+		gl.bindVertexArray(null);this.cursor_shadow_key=key;
+	}
+
 	render(origin: { x: number; y: number }, width: number, height: number, black: DSurface, white: DSurface,
 		mapped: (x: number, y: number) => boolean, cursor?:{x:number;y:number}): HTMLCanvasElement {
 		if (this.lost || this.gl.isContextLost()) throw new Error("The GPU context was lost; switched to legacy graphics.");
@@ -469,6 +550,9 @@ export class TerrainRenderer {
 			this.cursor_key=cursor_key;
 			this.cursor_hit=cursor_active?pick_terrain_point(this.mesh,cursor.x+origin.x,cursor.y-16+origin.y,mapped):null;
 		}
+		const hit=this.cursor_hit?.point??[0,0,0],lift=this.settings.cursor_height;
+		const cursor_position=[hit[0]!+lift/(2*TERRAIN_LEVEL),hit[1]!+lift/(2*TERRAIN_LEVEL),hit[2]!*TERRAIN_LEVEL+lift];
+		if(cursor_active&&this.cursor_hit&&this.settings.shadows)this.update_cursor_shadows(cursor_position);
 		gl.bindFramebuffer(gl.FRAMEBUFFER, this.target); gl.viewport(0, 0, width, height);
 		gl.disable(gl.SCISSOR_TEST); gl.clearColor(0, 0, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 		gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
@@ -486,7 +570,7 @@ export class TerrainRenderer {
 			gl.uniform1i(gl.getUniformLocation(prog, name), value ? 1 : 0);
 		}
 		gl.uniform1i(gl.getUniformLocation(prog,"use_cursor"),cursor_active&&this.cursor_hit?1:0);
-		const hit=this.cursor_hit?.point??[0,0,0],lift=this.settings.cursor_height;
+		gl.activeTexture(gl.TEXTURE7);gl.bindTexture(gl.TEXTURE_CUBE_MAP,this.cursor_shadow_texture);gl.uniform1i(gl.getUniformLocation(prog,"cursor_shadowmap"),7);
 		gl.uniform3f(gl.getUniformLocation(prog,"cursor_position"),hit[0]!+lift/(2*TERRAIN_LEVEL),hit[1]!+lift/(2*TERRAIN_LEVEL),hit[2]!*TERRAIN_LEVEL+lift);
 		gl.uniform1f(gl.getUniformLocation(prog,"cursor_radius"),this.settings.cursor_radius);
 		gl.uniform1f(gl.getUniformLocation(prog,"cursor_intensity"),this.settings.cursor_intensity);
@@ -612,6 +696,7 @@ export class TerrainRenderer {
 		for (const batch of this.batches) { gl.deleteBuffer(batch.buffer); gl.deleteVertexArray(batch.vao); }
 		for (const texture of this.textures) gl.deleteTexture(texture);
 		gl.deleteFramebuffer(this.target); gl.deleteRenderbuffer(this.depth);
+		gl.deleteFramebuffer(this.cursor_shadow_target);gl.deleteProgram(this.cursor_shadow_program);
 		gl.deleteFramebuffer(this.shadow_target); gl.deleteProgram(this.shadow_program);
 		gl.deleteProgram(this.terrain_program); gl.deleteProgram(this.composite_program);
 		gl.getExtension("WEBGL_lose_context")?.loseContext();

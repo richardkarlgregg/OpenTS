@@ -217,3 +217,23 @@ console.log('Full TMP checks passed: 2x2 cliff layout, 12 triangles, two indepen
 const wallHit=pick_terrain_point(clickMesh,...wallPixel,()=>true);
 assert.ok(wallHit&&wallHit.point.every((v,i)=>Math.abs(v-[4,4.5,2][i])<1e-6),'Cursor light hit must interpolate the visible cliff, not the cell center');
 console.log('Cursor hit checks passed: exact visible cliff intersection.');
+
+// A complete GLB owns its internal shape, while exposed map boundaries still need closure.
+const seamCell=cell(20,32,6),seamOwner=first.find(c=>c.x===20&&c.y===31);
+const withSeam=build_tile_map([...first,seamCell],assemblyTiles,new Map([['cliff17.tem/tile',assemblyAsset]]));
+const seamParts=withSeam.parts.filter(p=>p.kind==='closure'&&p.cell===seamOwner);
+assert.equal(seamParts.reduce((n,p)=>n+p.vertices.length/30,0),2,'Exposed outer edge of replacement needs a connecting cliff face');
+assert.equal(pick_terrain_cell(withSeam,...terrain_project(20.5,32,8),()=>true),seamOwner,'Restored cliff selects its owner rather than terrain behind the hole');
+const localSeam=seamParts[0].vertices.slice();for(let i=0;i<localSeam.length;i+=10){localSeam[i]-=20;localSeam[i+1]-=30;localSeam[i+2]-=6;}
+const authored={primitives:[...assemblyAsset.primitives,{vertices:localSeam}]};
+const coveredSeam=build_tile_map([...first,seamCell],assemblyTiles,new Map([['cliff17.tem/tile',authored]]));
+assert.equal(coveredSeam.parts.filter(p=>p.kind==='closure'&&p.cell===seamOwner).length,0,'Do not overlap a cliff face already authored in the GLB');
+const halfSeam=localSeam.slice();for(let i=2;i<halfSeam.length;i+=10)halfSeam[i]=2+halfSeam[i]/2;
+const partialSeam=build_tile_map([...first,seamCell],assemblyTiles,new Map([['cliff17.tem/tile',{primitives:[...assemblyAsset.primitives,{vertices:halfSeam}]}]]));
+let seamArea=0;for(const p of partialSeam.parts.filter(p=>p.kind==='closure'&&p.cell===seamOwner))for(let i=0;i<p.vertices.length;i+=30){const v=p.vertices;seamArea+=Math.abs((v[i+10]-v[i])*(v[i+22]-v[i+2])-(v[i+12]-v[i+2])*(v[i+20]-v[i]))/2;}
+assert.ok(Math.abs(seamArea-2)<1e-6,'Partial authored face leaves only its uncovered area to close');
+console.log('Replacement boundary checks passed: exposed corner closure, correct picking, and no overlap with full/partial authored faces.');
+
+const adjacentWall=localSeam.slice();for(let i=1;i<adjacentWall.length;i+=10)adjacentWall[i]-=2;
+const adjacentSeam=build_tile_map([...first,seamCell],assemblyTiles,new Map([['cliff17.tem/tile',assemblyAsset],['cliff17.tem/0',{primitives:[{vertices:adjacentWall}]}]]));
+assert.equal(adjacentSeam.parts.filter(p=>p.kind==='closure'&&p.cell===seamOwner).length,0,'Adjacent replacement can author the shared cliff face without duplicate closure');

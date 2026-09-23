@@ -104,6 +104,28 @@ let progress = 0;
 const blob = await shadow_test.export_blob("TEST", value => { progress = value; }, () => false);
 const scene = JSON.parse(await blob.text());
 if (progress !== 1 || scene.nodes.length !== shadow_test.mesh.parts.length) throw new Error("Asynchronous export lost map geometry");
+// Isolate cursor shadows from the sun, and verify movement/range invalidation.
+shadow_test.settings.normals=false;shadow_test.settings.wireframe=false;
+shadow_test.settings.cursor_light=true;shadow_test.settings.cursor_intensity=2;shadow_test.settings.cursor_height=1;shadow_test.settings.cursor_radius=10;
+const cursorFrame=(x:number,y:number)=>{ctx.drawImage(shadow_test.render({x:-220,y:-70},640,400,black,white,()=>true,{x:24*(x-y)+220,y:12*(x+y)+86}),0,0);return ctx.getImageData(0,0,640,400).data;};
+const cursorShadow=(x:number,y:number)=>{shadow_test.settings.shadows=false;const a=cursorFrame(x,y);shadow_test.settings.shadows=true;const b=cursorFrame(x,y);let count=0;for(let i=0;i<a.length;i+=4)if(a[i]!-b[i]!>3)count++;return {a,b,count};};
+const cursorA=cursorShadow(2.5,2.5),cursorB=cursorShadow(5.5,2.5);
+if(cursorA.count<10||cursorB.count<10)throw Error('Cursor shadows missing: '+cursorA.count+'/'+cursorB.count);
+if(cursorA.b.every((v,i)=>v===cursorB.b[i]))throw Error('Cursor shadow did not move');
+const cachedCursor=cursorFrame(5.5,2.5);
+if(cursorB.b.some((v,i)=>v!==cachedCursor[i]))throw Error('Cached cursor shadow changed');
+shadow_test.settings.cursor_height=2;const raisedCursor=cursorFrame(5.5,2.5);
+if(raisedCursor.every((v,i)=>v===cursorB.b[i]))throw Error('Cursor height did not refresh lighting');
+shadow_test.settings.cursor_radius=5;const shortCursor=cursorFrame(5.5,2.5);
+if(shortCursor.every((v,i)=>v===raisedCursor[i]))throw Error('Cursor range did not refresh lighting');
+const cursorCompare=document.createElement('details');cursorCompare.innerHTML='<summary>Cursor shadows: off / on</summary>';
+for(const pixels of [cursorA.a,cursorA.b]){const preview=document.createElement('canvas');preview.width=640;preview.height=400;preview.style.cssText='width:480px;height:300px;display:inline-block';const pc=preview.getContext('2d')!,image=pc.createImageData(640,400);image.data.set(pixels);pc.putImageData(image,0,0);cursorCompare.append(preview);}output.after(cursorCompare);
+const flatCursor=new TerrainRenderer(shadow_cells.map(c=>({...c,height:0})),{palette:test_palette,sets:[],bridge_set:-1,train_bridge_set:-1},new Map());
+Object.assign(flatCursor.settings,shadow_test.settings,{cursor_height:1,cursor_radius:10,shadows:false});
+const flatFrame=()=>{ctx.drawImage(flatCursor.render({x:-220,y:-70},640,400,black,white,()=>true,{x:220,y:146}),0,0);return ctx.getImageData(0,0,640,400).data;};
+const flatOff=flatFrame();flatCursor.settings.shadows=true;const flatOn=flatFrame();let acne=0;for(let i=0;i<flatOff.length;i+=4)if(flatOff[i]!-flatOn[i]!>3)acne++;
+if(acne>30)throw Error('Flat terrain self-shadows under cursor light: '+acne);flatCursor.dispose();
+log('PASS: cursor light casts terrain shadows with sun off ('+cursorA.count+'/'+cursorB.count+' pixels), follows movement, caches stationary shadows, and updates height/range.');
 shadow_test.dispose();
 log(`PASS: terrain casts shadows (${shadow_pixels} pixels), sun controls, unlit/normals/wireframe views, and asynchronous glTF export.`);
 await Show_Tactical(canvas, directory, "TEMPERATE", cells, { x: 0, y: 0, width: 25, height: 25 },

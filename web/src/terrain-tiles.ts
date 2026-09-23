@@ -124,6 +124,41 @@ function walls(tile: IsoSubtile | null, neighbors: Neighbors, image: TerrainImag
 	return new Float32Array(out);
 }
 
+/** Subtract authored faces on a boundary plane, leaving only the exposed map seam. */
+function boundary_remainder(vertices:Float32Array,instance:TileInstance,cell:TerrainCell,edge:number):Float32Array {
+	const axis=edge%2===0?1:0,along=1-axis,plane=edge===1||edge===2?1:0;
+	let polygons:TerrainVertex[][]=[];
+	for(let i=0;i<vertices.length;i+=30)polygons.push([0,10,20].map(k=>[vertices[i+k]!,vertices[i+k+1]!,vertices[i+k+2]!]));
+	for(const primitive of instance.asset.primitives) {
+		const v=primitive.vertices;
+		for(let i=0;i<v.length&&polygons.length;i+=30) {
+			const points=[0,10,20].map(k=>[v[i+k]!+instance.origin.x-cell.x,v[i+k+1]!+instance.origin.y-cell.y,v[i+k+2]!+instance.origin.height-cell.height]);
+			if(points.some(p=>Math.abs(p[axis]!-plane)>1e-4))continue;
+			const [a,b,c]=points as [number[],number[],number[]];
+			const area=(b[along]!-a[along]!)*(c[2]!-a[2]!)-(b[2]!-a[2]!)*(c[along]!-a[along]!);
+			if(Math.abs(area)<1e-8)continue;
+			const next:TerrainVertex[][]=[];
+			for(const polygon of polygons) {
+				let inside=polygon;
+				for(let e=0;e<3&&inside.length>=3;e++) {
+					const a=points[e]!,b=points[(e+1)%3]!,side=(p:TerrainVertex)=>Math.sign(area)*((b[along]!-a[along]!)*(p[2]-a[2]!)-(b[2]!-a[2]!)*(p[along]!-a[along]!));
+					const retained:TerrainVertex[]=[],outside:TerrainVertex[]=[];
+					for(let k=0;k<inside.length;k++) {
+						const p=inside[k]!,q=inside[(k+1)%inside.length]!,dp=side(p),dq=side(q);
+						(dp>=0?retained:outside).push(p);
+						if((dp>=0)!==(dq>=0)){const t=dp/(dp-dq),hit=p.map((n,j)=>n+t*(q[j]!-n)) as TerrainVertex;retained.push(hit);outside.push(hit);}
+					}
+					if(outside.length>=3)next.push(outside);inside=retained;
+				}
+			}
+			polygons=next;
+		}
+	}
+	const out:number[]=[];
+	for(const polygon of polygons)for(let i=1;i+1<polygon.length;i++)triangle(out,[polygon[0]!,polygon[i]!,polygon[i+1]!],null);
+	return new Float32Array(out);
+}
+
 const templates = new WeakMap<IsoSubtile, Float32Array>();
 export function tile_template(tile: IsoSubtile | null): Float32Array {
 	if (tile && templates.has(tile)) return templates.get(tile)!;
@@ -149,12 +184,33 @@ export function build_tile_map(cells: TerrainCell[], tiles: TheaterTiles, assets
 	const ids = new Map<string, number[]>(), lookup = new Map(cells.map(c=>[`${c.x},${c.y}`,c]));
 	const cliff_art = map_cliff_art(cells,tiles);
 	const covered=new Set<TerrainCell>();
-	for(const instance of tile_instances(cells,tiles,assets)) {
+	const instances=tile_instances(cells,tiles,assets),placements=new Map(instances.flatMap(i=>i.members.map(c=>[c,i] as const)));
+	for(const instance of instances) {
 		let materials=ids.get(instance.key);
 		if(!materials){materials=instance.asset.primitives.map((p,i)=>{
 			const id=mesh.materials.length;mesh.materials.push({key:`${instance.key}/${i}`,tile:null,extra:false,...p});return id;
 		});ids.set(instance.key,materials);}
 		append_instance(mesh,instance,materials);instance.members.forEach(c=>covered.add(c));
+		// The exported piece cannot know whether a later map exposes one of its outer sides.
+		const members=new Set(instance.members);
+		for(const cell of instance.members)for(const [edge,[dx,dy]] of OFFSETS.entries()) {
+			const neighbor=lookup.get(`${cell.x+dx},${cell.y+dy}`);
+			if(!neighbor||members.has(neighbor))continue;
+			const neighbors:Neighbors=OFFSETS.map((_,i)=>i===edge?{tile:fetch_subtile(tiles,neighbor.tile,neighbor.subtile),height:neighbor.height-cell.height}:undefined);
+			let boundary=boundary_remainder(walls(fetch_subtile(tiles,cell.tile,cell.subtile),neighbors,null),instance,cell,edge);
+			const adjacent=placements.get(neighbor),legacy=assets.get(tile_key(tiles,neighbor.tile,neighbor.subtile));
+			if(adjacent)boundary=boundary_remainder(boundary,adjacent,cell,edge);
+			else if(legacy)boundary=boundary_remainder(boundary,{key:"",origin:neighbor,members:[neighbor],asset:legacy},cell,edge);
+			if(!boundary.length)continue;
+			const source=cliff_art(cell,boundary),material=mesh.materials.length;
+			mesh.materials.push({key:instance.key+`/boundary@${cell.x},${cell.y}/${edge}`,tile:fetch_subtile(tiles,cell.tile,cell.subtile),extra:false,source});
+			for(let i=0;i<boundary.length;i+=10) {
+				boundary[i+3]=(24+24*(boundary[i]!-boundary[i+1]!)-source.left)/source.width;
+				boundary[i+4]=(12*(boundary[i]!+boundary[i+1]!-boundary[i+2]!)-source.top)/source.height;
+				boundary[i]=boundary[i]!+cell.x;boundary[i+1]=boundary[i+1]!+cell.y;boundary[i+2]=boundary[i+2]!+cell.height;boundary[i+5]=cell.x;boundary[i+6]=cell.y;
+			}
+			mesh.parts.push({kind:"closure",cell,material,vertices:boundary});mesh.triangles+=boundary.length/30;
+		}
 	}
 	for (const cell of cells) {
 		if(covered.has(cell))continue;

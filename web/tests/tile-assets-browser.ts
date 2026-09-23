@@ -1,4 +1,4 @@
-import { BoxGeometry, Mesh, MeshStandardMaterial, CanvasTexture, Matrix4, Vector3 } from "three";
+import { BoxGeometry, Group, Mesh, MeshStandardMaterial, CanvasTexture, Matrix4, Vector3 } from "three";
 import { GLTFExporter } from "three/addons/exporters/GLTFExporter.js";
 import { unzipSync } from "fflate";
 import { export_tile_glb,export_tile_pack,export_stamp_glb,export_stamp_pack,import_tile_glb,load_tile_assets } from "../src/terrain-assets";
@@ -157,3 +157,11 @@ renderer.dispose();
 log('PASS: ORM channels and factors, normal strength, emissive maps, all six GPU material toggles, cursor movement/sidebar/shroud, map export and generated-asset fallback.');
 
 link("Download baked material test","opents-baked-test.glb",new Blob([bakedBinary]));
+
+const multiScene=new Group(),intended=new Group(),unrelated=new Group();intended.name='cliff15.tem';unrelated.name='proad09.tem';
+intended.add(new Mesh(new BoxGeometry(1,1,1),new MeshStandardMaterial({metalness:0})));unrelated.add(new Mesh(new BoxGeometry(1,1,1),new MeshStandardMaterial({metalness:0})));unrelated.position.x=8;multiScene.add(intended,unrelated);
+const multiBinary=await new GLTFExporter().parseAsync(multiScene,{binary:true}) as ArrayBuffer;
+const focused=await import_tile_glb(multiBinary,true,'cliff15.tem'),allGroups=await import_tile_glb(multiBinary,true);
+assert(focused.primitives.reduce((n,p)=>n+p.vertices.length/30,0)===12&&allGroups.primitives.reduce((n,p)=>n+p.vertices.length/30,0)===24,'Complete tile loader included an unrelated Blender group');
+assert(focused.source===multiBinary,'Focused import mutated user asset bytes');
+log('PASS: filename-matched TMP group excludes unrelated Blender objects without modifying the asset.');

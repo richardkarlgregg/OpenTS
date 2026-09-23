@@ -37,7 +37,7 @@ export class TerrainControls {
 		bar.append(this.mode, this.tile_button, this.export_button, this.save, this.status);
 		const summary = document.createElement("summary"); summary.textContent = "Terrain debug";
 		const fields = document.createElement("div"); fields.className = "terrain-debug-fields";
-		const note = document.createElement("p"); note.textContent = "Enable Remaster to preview these settings. Sun shadows affect terrain meshes; sprites keep their original shadows. The cursor light previews baked details without casting shadows. Replacement changes apply immediately.";
+		const note = document.createElement("p"); note.textContent = "Enable Remaster to preview these settings. Sun and cursor-light shadows affect terrain meshes; sprites keep their original shadows. Terrain shadows controls both lights. Replacement changes apply immediately.";
 		const checkbox = (key: keyof TerrainSettings, title: string): void => {
 			const label = document.createElement("label"), input = document.createElement("input");
 			input.type = "checkbox"; input.checked = Boolean(settings[key]);

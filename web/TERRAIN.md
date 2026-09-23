@@ -42,10 +42,16 @@ inside a running mission.
 
 The loader matches theater, TMP filename, each occupied slot's map position,
 and its relative height. A complete matching footprint is replaced **once**.
+Exposed outer cliff edges keep map-generated connecting faces, textured from surrounding original art.
+Any boundary area already covered by an authored coplanar face is excluded,
+so the replacement is not double-covered. These map-dependent seams are
+included in whole-map exports; individual TMP exports retain their local shape.
 Partially overwritten stamps, missing cells or altered relative heights keep
 their generated terrain or older subtile replacements. Default clear-tile map
 IDs resolve to the actual clear filename. Filename matching is case-insensitive;
-avoid paths differing only in case. No handwritten manifest is needed.
+avoid paths differing only in case. No handwritten manifest is needed. If a GLB
+contains a group named for its TMP filename, only that group is loaded; unrelated named pieces in the Blender
+scene are ignored. Export Selected Objects to avoid including other pieces.
 
 Older `<subtile>.glb` files still load as per-cell fallbacks with their original
 coordinate convention. A matching `tile.glb` takes precedence over them.
@@ -130,8 +136,11 @@ Open **Terrain debug** while Remaster is enabled:
 - **Light follows cursor** places a point light along the camera ray above the
   visible surface under the pointer. Height, range and intensity are adjustable.
   It works with directional lighting off, stays inactive over the sidebar or
-  hidden terrain, and follows cliffs and edited meshes. It does not cast shadows;
-  the sun's existing terrain shadows remain available.
+  hidden terrain, and follows cliffs and edited meshes. It casts shadows from generated and replacement terrain in all directions.
+  **Terrain shadows** controls both the sun and cursor light, including when
+  directional lighting is off. The shadow map refreshes when the light position,
+  height or range changes; stationary lighting reuses its cached map. Sprites
+  keep their original 2D shadows.
 - **Surface normals**, **Wireframe**, sun controls and **Reset lighting and
   debug** remain available. Reset restores replacement assets and material maps.
 
